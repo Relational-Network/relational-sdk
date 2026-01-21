@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Relational Network
+
+[package]
+name = "relational-sdk"
+version = "0.1.0"
+edition = "2021"
+authors = ["Relational Network"]
+description = "Enclave Microservice using Axum"
+license = "AGPL-3.0-or-later"
+rust-version = "1.92"
+
+[dependencies]
+axum = "0.8.8"
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1.0.228", features = ["derive"] }
+utoipa = { version = "5.4.0", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
