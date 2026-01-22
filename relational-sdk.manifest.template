@@ -4,10 +4,14 @@
 
 # Rust manifest for Relational SDK
 
-libos.entrypoint = "{{ self_exe }}"
+loader.argv = [
+  "gramine-ratls", "-P", "/tmp/ra-tls.crt.pem", "/tmp/ra-tls.key.pem", "--",
+  "{{ self_exe }}",
+]
+libos.entrypoint = "/gramine-ratls"
 loader.log_level = "{{ log_level }}"
 
-loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}"
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr{{ arch_libdir }}"
 
 # See https://gramine.readthedocs.io/en/stable/performance.html#glibc-malloc-tuning
 loader.env.MALLOC_ARENA_MAX = "1"
@@ -16,21 +20,27 @@ loader.env.MALLOC_ARENA_MAX = "1"
 loader.env.RUST_BACKTRACE = "full"
 
 fs.mounts = [
+  { path = "/gramine-ratls", uri = "file:{{ entrypoint }}" },
   { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
   { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
+  { path = "/usr{{ arch_libdir }}", uri = "file:/usr{{ arch_libdir }}" },
+  { path = "/tmp", type = "tmpfs" },
 ]
 
 sgx.debug = true
 sgx.edmm_enable = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
+sgx.remote_attestation = "{{ ra_type }}"
 
 # `use_exinfo = true` is needed because the application may trigger lazy allocation of pages
 # (through exception handling) when EDMM is enabled
 sgx.use_exinfo = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
 
 sgx.trusted_files = [
+  "file:{{ entrypoint }}",
   "file:{{ self_exe }}",
   "file:{{ gramine.runtimedir() }}/",
   "file:{{ arch_libdir }}/",
+  "file:/usr{{ arch_libdir }}/",
 ]
 
 # The maximum number of threads in a single process needs to be declared in advance.

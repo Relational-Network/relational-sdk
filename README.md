@@ -2,10 +2,16 @@
 
 Barebones Rust API server scaffold for enclave use.
 
+## Build
+
+```bash
+make all
+```
+
 ## Run
 
 ```bash
-cargo run
+gramine-sgx relational-sdk
 ```
 
 ## Endpoints
@@ -13,6 +19,7 @@ cargo run
 - `GET /health` -> readiness summary (200 or 503)
 - `GET /health/live` -> liveness details
 - `GET /health/ready` -> readiness details (200 or 503)
+- `GET /attestation/public-key` -> enclave public key (JWK) for browser encryption
 - `GET /docs` -> Swagger UI
 - `GET /api-doc/openapi.json` -> OpenAPI spec
 
@@ -29,6 +36,22 @@ The runtime uses `worker_threads = 2` to keep enclave thread usage predictable. 
 - 4 Gramine/helper threads (main + IPC + async + one TLS-handshake)
 - Tokio worker threads (currently 2)
 - Any extra threads from blocking pools or future background tasks
+
+## RA-TLS (DCAP)
+
+When running in SGX with Gramine, the manifest uses `gramine-ratls` to generate a RA-TLS
+certificate and key in `/tmp`. The server reads the fixed paths:
+- `/tmp/ra-tls.crt.pem`
+- `/tmp/ra-tls.key.pem`
+
+TLS is required for RA-TLS deployments; the server will fail fast if the files are missing.
+
+Example:
+
+```bash
+make RA_TYPE=dcap
+gramine-sgx relational-sdk
+```
 
 ## License
 
