@@ -7,3 +7,8 @@
 relational-sdk.sig
 relational-sdk.manifest
 relational-sdk.manifest.sgx
+
+# Attestation client build artifacts
+attestation-client/attest
+attestation-client/ssl/ca.crt
+attestation-client/ssl/ca.key

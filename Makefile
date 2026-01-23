@@ -57,6 +57,29 @@ start-gramine-server: all
 .PHONY: clean
 clean:
 	$(RM) -rf *.sig *.manifest.sgx *.manifest
+	$(MAKE) -C attestation-client clean
+
+##################### REMOTE ATTESTATION CLIENT ##############################
+
+# Build attestation client
+.PHONY: attest
+attest:
+	$(MAKE) -C attestation-client
+
+# Test attestation against running enclave
+.PHONY: test-attest
+test-attest:
+	$(MAKE) -C attestation-client test
+
+# Run all attestation tests (including negative tests)
+.PHONY: test-attest-all
+test-attest-all:
+	$(MAKE) -C attestation-client test-all
+
+# Show current enclave measurements
+.PHONY: show-measurements
+show-measurements: relational-sdk.sig
+	@gramine-sgx-sigstruct-view relational-sdk.sig | grep -E "mr_enclave|mr_signer|isv_prod_id|isv_svn"
 
 .PHONY: distclean
 distclean: clean

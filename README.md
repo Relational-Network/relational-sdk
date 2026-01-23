@@ -144,6 +144,57 @@ make SGX=1 RA_TYPE=dcap
 gramine-sgx relational-sdk
 ```
 
+## Testing Attestation
+
+A C-based RA-TLS verification client is included in `attestation-client/` for testing SGX attestation. It uses Intel DCAP to verify the SGX quote embedded in the RA-TLS certificate.
+
+### Quick Start
+
+```bash
+# Terminal 1: Start the enclave
+make SGX=1 RA_TYPE=dcap
+gramine-sgx relational-sdk
+
+# Terminal 2: Test attestation
+make test-attest
+```
+
+### Available Test Commands
+
+| Command | Description |
+|---------|-------------|
+| `make attest` | Build attestation client |
+| `make test-attest` | Test attestation (auto-extracts measurements from .sig) |
+| `make test-attest-all` | Run all tests including negative tests |
+| `make show-measurements` | Show current enclave measurements |
+
+### Testing Against Remote Enclave
+
+```bash
+# Test against a remote enclave
+cd attestation-client
+make test HOST=enclave.example.com PORT=443
+```
+
+### Verifying Wrong Measurements Are Rejected
+
+```bash
+make test-attest-all
+# Output shows:
+# ✓ Correctly rejected wrong MRENCLAVE
+# ✓ Correctly rejected wrong MRSIGNER
+```
+
+### How It Works
+
+1. Client connects to enclave over TLS
+2. During handshake, receives RA-TLS certificate containing SGX quote
+3. `libra_tls_verify_dcap.so` verifies the quote via Intel DCAP
+4. Client compares enclave measurements (MRENCLAVE, MRSIGNER) against expected values
+5. If all checks pass, handshake completes and client can communicate securely
+
+See `attestation-client/README.md` for detailed documentation.
+
 ## Module Structure
 
 The codebase is organized into logical modules:
