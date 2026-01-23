@@ -5,7 +5,7 @@ use axum::{
     extract::{FromRequestParts, State},
     http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use base64::Engine;
@@ -99,7 +99,9 @@ struct JwksResponse {
 }
 
 // Claims from AVS-issued attestation tokens.
+// Note: exp/aud are validated by jsonwebtoken internally; we keep them for debugging.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct AttestationClaims {
     iss: String,
     sub: String,
@@ -118,6 +120,88 @@ pub struct TokenData {
     pub sub: String,
     pub role: String,
     pub iss: String,
+}
+
+impl TokenData {
+    /// Check if the user has the required role.
+    /// Role hierarchy: admin > user > read_only
+    pub fn has_role(&self, required: &str) -> bool {
+        match required {
+            "read_only" => matches!(self.role.as_str(), "admin" | "user" | "read_only"),
+            "user" => matches!(self.role.as_str(), "admin" | "user"),
+            "admin" => self.role == "admin",
+            _ => false,
+        }
+    }
+}
+
+// Role-based extractors for compile-time role requirements.
+// These wrap TokenData and enforce role checks at extraction time.
+
+/// Extractor that requires "admin" role.
+#[derive(Debug, Clone)]
+pub struct AdminToken(pub TokenData);
+
+/// Extractor that requires "user" role (or higher).
+#[derive(Debug, Clone)]
+pub struct UserToken(pub TokenData);
+
+/// Extractor that requires "read_only" role (or higher).
+#[derive(Debug, Clone)]
+pub struct ReadOnlyToken(pub TokenData);
+
+impl FromRequestParts<AppState> for AdminToken {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = TokenData::from_request_parts(parts, state).await?;
+        if !token.has_role("admin") {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "admin role required"})),
+            ));
+        }
+        Ok(AdminToken(token))
+    }
+}
+
+impl FromRequestParts<AppState> for UserToken {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = TokenData::from_request_parts(parts, state).await?;
+        if !token.has_role("user") {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "user role required"})),
+            ));
+        }
+        Ok(UserToken(token))
+    }
+}
+
+impl FromRequestParts<AppState> for ReadOnlyToken {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = TokenData::from_request_parts(parts, state).await?;
+        if !token.has_role("read_only") {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "read_only role required"})),
+            ));
+        }
+        Ok(ReadOnlyToken(token))
+    }
 }
 
 // Cached JWKS for token verification.
@@ -443,7 +527,7 @@ struct ProtectedResponse {
     role: String,
 }
 
-// Protected test endpoint requiring valid AVS token.
+// Protected test endpoint requiring valid AVS token (any role).
 #[utoipa::path(
     get,
     path = "/protected",
@@ -467,10 +551,85 @@ async fn protected(
     )
 }
 
+// Admin-only endpoint.
+#[utoipa::path(
+    get,
+    path = "/admin/status",
+    responses(
+        (status = 200, description = "Admin status", body = ProtectedResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden - admin role required")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn admin_status(
+    State(_state): State<AppState>,
+    AdminToken(token): AdminToken,
+) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(ProtectedResponse {
+            message: "admin access granted".to_string(),
+            sub: token.sub,
+            role: token.role,
+        }),
+    )
+}
+
+// User-level endpoint (user or admin).
+#[utoipa::path(
+    post,
+    path = "/data/upload",
+    responses(
+        (status = 200, description = "Upload accepted", body = ProtectedResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden - user role required")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn data_upload(
+    State(_state): State<AppState>,
+    UserToken(token): UserToken,
+) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(ProtectedResponse {
+            message: "upload accepted".to_string(),
+            sub: token.sub,
+            role: token.role,
+        }),
+    )
+}
+
+// Read-only endpoint (any authenticated role).
+#[utoipa::path(
+    get,
+    path = "/data/query",
+    responses(
+        (status = 200, description = "Query result", body = ProtectedResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden - read_only role required")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn data_query(
+    State(_state): State<AppState>,
+    ReadOnlyToken(token): ReadOnlyToken,
+) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(ProtectedResponse {
+            message: "query result".to_string(),
+            sub: token.sub,
+            role: token.role,
+        }),
+    )
+}
+
 // OpenAPI spec for /docs.
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, health_live, health_ready, attestation_public_key, protected),
+    paths(health, health_live, health_ready, attestation_public_key, protected, admin_status, data_upload, data_query),
     components(schemas(LiveResponse, ReadyResponse, CheckStatus, Jwk, ProtectedResponse)),
     modifiers(&SecurityAddon)
 )]
@@ -517,6 +676,9 @@ async fn main() {
         .route("/health/ready", get(health_ready))
         .route("/attestation/public-key", get(attestation_public_key))
         .route("/protected", get(protected))
+        .route("/admin/status", get(admin_status))
+        .route("/data/upload", post(data_upload))
+        .route("/data/query", get(data_query))
         .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
         .with_state(state);
 
