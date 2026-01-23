@@ -1,684 +1,190 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Relational Network
 
+//! Relational SDK - SGX Enclave Server with RA-TLS
+//!
+//! This server runs inside an Intel SGX enclave and provides:
+//! - RA-TLS attestation binding enclave identity to public keys
+//! - JWT validation using AVS-issued tokens
+//! - Role-based access control (admin, user, read_only)
+//! - Encrypted data upload and query endpoints
+//!
+//! # Architecture
+//!
+//! ```text
+//! Browser → AVS → JWT + enclave public key
+//!                     ↓
+//! Browser encrypts data → Enclave (this server) decrypts inside SGX
+//! ```
+//!
+//! # Building & Running
+//!
+//! ```bash
+//! make SGX=1 RA_TYPE=dcap
+//! gramine-sgx relational-sdk
+//! ```
+
+mod auth;
+mod config;
+mod crypto;
+mod handlers;
+mod health;
+mod tls;
+
 use axum::{
-    extract::{FromRequestParts, State},
-    http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
     routing::{get, post},
-    Json, Router,
+    Router,
 };
-use base64::Engine;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use p256::elliptic_curve::rand_core::OsRng;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
-use p256::SecretKey;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::io;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
-use utoipa::{OpenApi, ToSchema};
+use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
 
-// Start time captured once so uptime can be reported without mutable globals.
-static STARTED_AT: OnceLock<Instant> = OnceLock::new();
-// Enclave keypair is created once per process and used to build the public JWK.
-// TODO: Update key generation for rotation or persistence as needed.
-static ENCLAVE_KEY: OnceLock<EnclaveKey> = OnceLock::new();
-// TODO: Decide if/when to use a configured data directory for readiness checks.
-const DATA_DIR_ENV: &str = "DATA_DIR";
-// AVS JWKS URL for token verification.
-const AVS_JWKS_URL: &str = "http://127.0.0.1:9100/.well-known/jwks.json";
-// Expected audience claim in AVS tokens.
-const AVS_AUDIENCE: &str = "relational-sdk";
+use auth::AppState;
+use config::{AVS_AUDIENCE, AVS_JWKS_URL, DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH};
+use crypto::enclave_key;
+use handlers::{
+    admin_status, data_query, data_upload, get_public_key, protected, AdminStatusResponse,
+    DataQueryResponse, DataUploadRequest, DataUploadResponse, ProtectedResponse,
+};
+use health::{health, liveness, readiness, HealthChecks, HealthResponse, ReadyResponse};
+use tls::load_tls_config;
 
-// Fixed RA-TLS certificate location written by gramine-ratls (tmpfs).
-const DEFAULT_TLS_CERT_PATH: &str = "/tmp/ra-tls.crt.pem";
-// Fixed RA-TLS key location written by gramine-ratls (tmpfs).
-const DEFAULT_TLS_KEY_PATH: &str = "/tmp/ra-tls.key.pem";
+/// Start time captured once for uptime reporting.
+static STARTED_AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
-// Lightweight liveness payload (always 200).
-#[derive(Serialize, ToSchema)]
-struct LiveResponse {
-    // Overall status for the liveness probe.
-    status: &'static str,
-    // Build metadata for ops visibility.
-    service: &'static str,
-    version: &'static str,
-    // Seconds since process start.
-    uptime_seconds: u64,
-}
+// ============================================================================
+// OpenAPI Documentation
+// ============================================================================
 
-// Individual readiness check result.
-#[derive(Serialize, ToSchema)]
-struct CheckStatus {
-    // Check identifier (e.g., "data_dir").
-    name: String,
-    // "ok" or "fail".
-    status: &'static str,
-    // Optional failure message when status == "fail".
-    message: Option<String>,
-}
-
-// Readiness payload, used by /health and /health/ready.
-#[derive(Serialize, ToSchema)]
-struct ReadyResponse {
-    // Overall readiness status ("ok" or "not_ready").
-    status: &'static str,
-    // Build metadata for ops visibility.
-    service: &'static str,
-    version: &'static str,
-    // Seconds since process start.
-    uptime_seconds: u64,
-    // Per-check results to aid debugging.
-    checks: Vec<CheckStatus>,
-}
-
-// JWK describing the enclave's public key for client-side encryption.
-#[derive(Clone, Serialize, Deserialize, ToSchema)]
-struct Jwk {
-    kty: String,
-    crv: Option<String>,
-    x: Option<String>,
-    y: Option<String>,
-    n: Option<String>,
-    e: Option<String>,
-    #[serde(rename = "use", skip_serializing_if = "Option::is_none")]
-    use_: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    alg: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kid: Option<String>,
-}
-
-// JWKS response from AVS.
-#[derive(Clone, Deserialize)]
-struct JwksResponse {
-    keys: Vec<Jwk>,
-}
-
-// Claims from AVS-issued attestation tokens.
-// Note: exp/aud are validated by jsonwebtoken internally; we keep them for debugging.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct AttestationClaims {
-    iss: String,
-    sub: String,
-    aud: Option<String>,
-    exp: u64,
-    iat: u64,
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(default)]
-    nonce: Option<String>,
-}
-
-// Validated token data extracted for request handlers.
-#[derive(Debug, Clone)]
-pub struct TokenData {
-    pub sub: String,
-    pub role: String,
-    pub iss: String,
-}
-
-impl TokenData {
-    /// Check if the user has the required role.
-    /// Role hierarchy: admin > user > read_only
-    pub fn has_role(&self, required: &str) -> bool {
-        match required {
-            "read_only" => matches!(self.role.as_str(), "admin" | "user" | "read_only"),
-            "user" => matches!(self.role.as_str(), "admin" | "user"),
-            "admin" => self.role == "admin",
-            _ => false,
-        }
-    }
-}
-
-// Role-based extractors for compile-time role requirements.
-// These wrap TokenData and enforce role checks at extraction time.
-
-/// Extractor that requires "admin" role.
-#[derive(Debug, Clone)]
-pub struct AdminToken(pub TokenData);
-
-/// Extractor that requires "user" role (or higher).
-#[derive(Debug, Clone)]
-pub struct UserToken(pub TokenData);
-
-/// Extractor that requires "read_only" role (or higher).
-#[derive(Debug, Clone)]
-pub struct ReadOnlyToken(pub TokenData);
-
-impl FromRequestParts<AppState> for AdminToken {
-    type Rejection = (StatusCode, Json<serde_json::Value>);
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let token = TokenData::from_request_parts(parts, state).await?;
-        if !token.has_role("admin") {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": "admin role required"})),
-            ));
-        }
-        Ok(AdminToken(token))
-    }
-}
-
-impl FromRequestParts<AppState> for UserToken {
-    type Rejection = (StatusCode, Json<serde_json::Value>);
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let token = TokenData::from_request_parts(parts, state).await?;
-        if !token.has_role("user") {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": "user role required"})),
-            ));
-        }
-        Ok(UserToken(token))
-    }
-}
-
-impl FromRequestParts<AppState> for ReadOnlyToken {
-    type Rejection = (StatusCode, Json<serde_json::Value>);
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let token = TokenData::from_request_parts(parts, state).await?;
-        if !token.has_role("read_only") {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": "read_only role required"})),
-            ));
-        }
-        Ok(ReadOnlyToken(token))
-    }
-}
-
-// Cached JWKS for token verification.
-struct JwksCache {
-    keys: Vec<(String, DecodingKey)>,
-    fetched_at: Instant,
-}
-
-// Shared application state.
-#[derive(Clone)]
-struct AppState {
-    audience: String,
-    jwks_cache: Arc<RwLock<Option<JwksCache>>>,
-}
-
-// In-memory keypair bound to the enclave instance lifetime.
-struct EnclaveKey {
-    _private_key: SecretKey,
-    public_jwk: Jwk,
-}
-
-// JWKS cache TTL in seconds.
-const JWKS_CACHE_TTL_SECS: u64 = 300;
-
-// Fetch JWKS from AVS and cache the decoding keys.
-async fn fetch_jwks(url: &str) -> Result<Vec<(String, DecodingKey)>, String> {
-    let response = reqwest::get(url)
-        .await
-        .map_err(|e| format!("failed to fetch JWKS: {e}"))?;
-    let jwks: JwksResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse JWKS: {e}"))?;
-
-    let mut keys = Vec::new();
-    for jwk in jwks.keys {
-        let kid = jwk.kid.clone().unwrap_or_default();
-        // Support EC P-256 keys (used by AVS).
-        if jwk.kty == "EC" {
-            if let (Some(x), Some(y)) = (&jwk.x, &jwk.y) {
-                if let Ok(key) = DecodingKey::from_ec_components(x, y) {
-                    keys.push((kid.clone(), key));
-                }
-            }
-        }
-        // Support RSA keys if needed in future.
-        if jwk.kty == "RSA" {
-            if let (Some(n), Some(e)) = (&jwk.n, &jwk.e) {
-                if let Ok(key) = DecodingKey::from_rsa_components(n, e) {
-                    keys.push((kid.clone(), key));
-                }
-            }
-        }
-    }
-    Ok(keys)
-}
-
-// Get or refresh JWKS cache.
-async fn get_decoding_keys(state: &AppState) -> Result<Vec<(String, DecodingKey)>, String> {
-    // Check cache validity.
-    {
-        let cache = state.jwks_cache.read().unwrap();
-        if let Some(ref c) = *cache {
-            if c.fetched_at.elapsed().as_secs() < JWKS_CACHE_TTL_SECS {
-                return Ok(c.keys.clone());
-            }
-        }
-    }
-
-    // Fetch and update cache.
-    let keys = fetch_jwks(AVS_JWKS_URL).await?;
-    {
-        let mut cache = state.jwks_cache.write().unwrap();
-        *cache = Some(JwksCache {
-            keys: keys.clone(),
-            fetched_at: Instant::now(),
-        });
-    }
-    Ok(keys)
-}
-
-// Validate an AVS-issued JWT and extract claims.
-async fn validate_token(state: &AppState, token: &str) -> Result<TokenData, String> {
-    let keys = get_decoding_keys(state).await?;
-    if keys.is_empty() {
-        return Err("no valid keys in JWKS".to_string());
-    }
-
-    // Decode header to find kid.
-    let header = decode_header(token).map_err(|e| format!("invalid token header: {e}"))?;
-    let kid = header.kid.as_deref();
-
-    // Find matching key or try all keys.
-    let decoding_key = if let Some(kid) = kid {
-        keys.iter()
-            .find(|(k, _)| k == kid)
-            .map(|(_, key)| key)
-            .ok_or_else(|| format!("no key found for kid: {kid}"))?
-    } else {
-        &keys[0].1
-    };
-
-    // Configure validation.
-    let mut validation = Validation::new(Algorithm::ES256);
-    validation.set_audience(&[&state.audience]);
-    validation.validate_exp = true;
-
-    let token_data = decode::<AttestationClaims>(token, decoding_key, &validation)
-        .map_err(|e| format!("token validation failed: {e}"))?;
-
-    Ok(TokenData {
-        sub: token_data.claims.sub,
-        role: token_data.claims.role.unwrap_or_else(|| "user".to_string()),
-        iss: token_data.claims.iss,
-    })
-}
-
-// Axum extractor for validated tokens from Authorization header.
-impl FromRequestParts<AppState> for TokenData {
-    type Rejection = (StatusCode, Json<serde_json::Value>);
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let auth_header = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({"error": "missing authorization header"})),
-                )
-            })?;
-
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({"error": "invalid authorization header format"})),
-                )
-            })?;
-
-        validate_token(state, token).await.map_err(|e| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": e})),
-            )
-        })
-    }
-}
-
-// Compute uptime in seconds from the captured start instant.
-fn uptime_seconds() -> u64 {
-    STARTED_AT
-        .get()
-        .map(|started_at| started_at.elapsed().as_secs())
-        .unwrap_or(0)
-}
-
-// Health endpoints should not be cached by proxies.
-fn health_headers() -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    headers
-}
-
-// Shared liveness response builder.
-fn live_response() -> LiveResponse {
-    LiveResponse {
-        status: "ok",
-        service: env!("CARGO_PKG_NAME"),
-        version: env!("CARGO_PKG_VERSION"),
-        uptime_seconds: uptime_seconds(),
-    }
-}
-
-// Aggregate readiness checks (extend as dependencies are added).
-fn readiness_checks() -> Vec<CheckStatus> {
-    let mut checks = Vec::new();
-
-    // Optional data directory check for when a storage path is configured.
-    if let Ok(path) = std::env::var(DATA_DIR_ENV) {
-        let result = check_data_dir(&path);
-        checks.push(CheckStatus {
-            name: "data_dir".to_string(),
-            status: if result.is_ok() { "ok" } else { "fail" },
-            message: result.err(),
-        });
-    }
-
-    checks
-}
-
-// Generate or return the enclave keypair for encrypting uploads.
-// TODO: Seal or persist the private key across restarts (optional).
-// TODO: Derive keys using mr_enclave to bind to the enclave identity.
-// TODO: Rotate keys on a schedule and bind them to an attestation token.
-fn enclave_key() -> &'static EnclaveKey {
-    ENCLAVE_KEY.get_or_init(|| {
-        let secret_key = SecretKey::random(&mut OsRng);
-        let public_jwk = jwk_for_public_key(&secret_key.public_key());
-        EnclaveKey {
-            _private_key: secret_key,
-            public_jwk,
-        }
-    })
-}
-
-// Convert the enclave public key into a JWK for browser-side encryption.
-fn jwk_for_public_key(public_key: &p256::PublicKey) -> Jwk {
-    let encoded = public_key.to_encoded_point(false);
-    let bytes = encoded.as_bytes();
-    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes[1..33]);
-    let y = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes[33..65]);
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let kid = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
-
-    Jwk {
-        kty: "EC".to_string(),
-        crv: Some("P-256".to_string()),
-        x: Some(x),
-        y: Some(y),
-        n: None,
-        e: None,
-        use_: Some("enc".to_string()),
-        alg: Some("ECDH-ES".to_string()),
-        kid: Some(kid),
-    }
-}
-
-// Verify the configured data directory exists and is a directory.
-fn check_data_dir(path: &str) -> Result<(), String> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|err| format!("{}: {}", path, err))?;
-    if !metadata.is_dir() {
-        return Err("path is not a directory".to_string());
-    }
-    Ok(())
-}
-
-// /health behaves like readiness for common load-balancer expectations.
-#[utoipa::path(
-    get,
-    path = "/health",
-    responses(
-        (status = 200, description = "Service is ready", body = ReadyResponse),
-        (status = 503, description = "Service is not ready", body = ReadyResponse)
-    )
-)]
-async fn health() -> impl IntoResponse {
-    health_ready().await
-}
-
-// Liveness endpoint: process is up and serving.
-#[utoipa::path(
-    get,
-    path = "/health/live",
-    responses(
-        (status = 200, description = "Service is live", body = LiveResponse)
-    )
-)]
-async fn health_live() -> impl IntoResponse {
-    let headers = health_headers();
-    let body = live_response();
-
-    (StatusCode::OK, headers, Json(body))
-}
-
-// Readiness endpoint: checks dependencies and returns 200 or 503.
-#[utoipa::path(
-    get,
-    path = "/health/ready",
-    responses(
-        (status = 200, description = "Service is ready", body = ReadyResponse),
-        (status = 503, description = "Service is not ready", body = ReadyResponse)
-    )
-)]
-async fn health_ready() -> impl IntoResponse {
-    let headers = health_headers();
-    let checks = readiness_checks();
-    // Any failing check marks the service as not ready.
-    let ready = checks.iter().all(|check| check.status == "ok");
-    let body = ReadyResponse {
-        status: if ready { "ok" } else { "not_ready" },
-        service: env!("CARGO_PKG_NAME"),
-        version: env!("CARGO_PKG_VERSION"),
-        uptime_seconds: uptime_seconds(),
-        checks,
-    };
-
-    if ready {
-        (StatusCode::OK, headers, Json(body))
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, headers, Json(body))
-    }
-}
-
-// Public key for browser-side encryption, bound to the enclave instance.
-// TODO: Consider rate limits and access control; this exposes the enclave's public key.
-#[utoipa::path(
-    get,
-    path = "/attestation/public-key",
-    responses(
-        (status = 200, description = "Enclave public key (JWK)", body = Jwk)
-    )
-)]
-async fn attestation_public_key() -> impl IntoResponse {
-    let headers = health_headers();
-    // TODO: Consider rate limits and access control; this exposes the enclave's public key.
-    let jwk = &enclave_key().public_jwk;
-    (StatusCode::OK, headers, Json(jwk))
-}
-
-// Protected endpoint response.
-#[derive(Serialize, ToSchema)]
-struct ProtectedResponse {
-    message: String,
-    sub: String,
-    role: String,
-}
-
-// Protected test endpoint requiring valid AVS token (any role).
-#[utoipa::path(
-    get,
-    path = "/protected",
-    responses(
-        (status = 200, description = "Access granted", body = ProtectedResponse),
-        (status = 401, description = "Unauthorized")
-    ),
-    security(("bearer_auth" = []))
-)]
-async fn protected(
-    State(_state): State<AppState>,
-    token: TokenData,
-) -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(ProtectedResponse {
-            message: "access granted".to_string(),
-            sub: token.sub,
-            role: token.role,
-        }),
-    )
-}
-
-// Admin-only endpoint.
-#[utoipa::path(
-    get,
-    path = "/admin/status",
-    responses(
-        (status = 200, description = "Admin status", body = ProtectedResponse),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Forbidden - admin role required")
-    ),
-    security(("bearer_auth" = []))
-)]
-async fn admin_status(
-    State(_state): State<AppState>,
-    AdminToken(token): AdminToken,
-) -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(ProtectedResponse {
-            message: "admin access granted".to_string(),
-            sub: token.sub,
-            role: token.role,
-        }),
-    )
-}
-
-// User-level endpoint (user or admin).
-#[utoipa::path(
-    post,
-    path = "/data/upload",
-    responses(
-        (status = 200, description = "Upload accepted", body = ProtectedResponse),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Forbidden - user role required")
-    ),
-    security(("bearer_auth" = []))
-)]
-async fn data_upload(
-    State(_state): State<AppState>,
-    UserToken(token): UserToken,
-) -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(ProtectedResponse {
-            message: "upload accepted".to_string(),
-            sub: token.sub,
-            role: token.role,
-        }),
-    )
-}
-
-// Read-only endpoint (any authenticated role).
-#[utoipa::path(
-    get,
-    path = "/data/query",
-    responses(
-        (status = 200, description = "Query result", body = ProtectedResponse),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Forbidden - read_only role required")
-    ),
-    security(("bearer_auth" = []))
-)]
-async fn data_query(
-    State(_state): State<AppState>,
-    ReadOnlyToken(token): ReadOnlyToken,
-) -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(ProtectedResponse {
-            message: "query result".to_string(),
-            sub: token.sub,
-            role: token.role,
-        }),
-    )
-}
-
-// OpenAPI spec for /docs.
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, health_live, health_ready, attestation_public_key, protected, admin_status, data_upload, data_query),
-    components(schemas(LiveResponse, ReadyResponse, CheckStatus, Jwk, ProtectedResponse)),
-    modifiers(&SecurityAddon)
+    info(
+        title = "Relational SDK API",
+        version = "0.1.0",
+        description = r#"SGX Enclave server with RA-TLS, JWT validation, and RBAC.
+
+## Authentication
+
+Protected endpoints require a JWT token from the Attestation Verification Service (AVS).
+
+### How to get a token:
+
+```bash
+curl -s -X POST http://127.0.0.1:9100/v1/attest \
+  -H 'Content-Type: application/json' \
+  -d '{"enclave_url":"https://127.0.0.1:8080"}' | jq -r '.token'
+```
+
+### How to use in Swagger UI:
+
+1. Click the **Authorize** button at the top right
+2. Paste your JWT token (without "Bearer " prefix)
+3. Click **Authorize**, then **Close**
+4. Now you can test protected endpoints
+
+### Roles:
+
+- **admin**: Full access to all endpoints
+- **user**: Can upload and query data
+- **read_only**: Can only query data
+
+To get a token with a specific role:
+
+```bash
+curl -s -X POST http://127.0.0.1:9100/v1/attest \
+  -H 'Content-Type: application/json' \
+  -d '{"enclave_url":"https://127.0.0.1:8080","role":"admin"}' | jq -r '.token'
+```
+"#
+    ),
+    paths(
+        health::health,
+        health::liveness,
+        health::readiness,
+        handlers::get_public_key,
+        handlers::protected,
+        handlers::admin_status,
+        handlers::data_upload,
+        handlers::data_query,
+    ),
+    components(schemas(
+        HealthResponse,
+        ReadyResponse,
+        HealthChecks,
+        ProtectedResponse,
+        AdminStatusResponse,
+        DataUploadRequest,
+        DataUploadResponse,
+        DataQueryResponse,
+        crypto::Jwk,
+    )),
+    modifiers(&SecurityAddon),
+    tags(
+        (name = "Health", description = "Health check endpoints"),
+        (name = "Attestation", description = "Enclave attestation and public key"),
+        (name = "Protected", description = "JWT-protected endpoints"),
+        (name = "Admin", description = "Admin-only endpoints"),
+        (name = "Data", description = "Data upload and query endpoints"),
+    )
 )]
-// OpenAPI registry for Swagger UI.
 struct ApiDoc;
 
-// Add bearer auth to OpenAPI.
+/// Add bearer auth security scheme to OpenAPI.
 struct SecurityAddon;
 
-impl utoipa::Modify for SecurityAddon {
+impl Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         if let Some(components) = openapi.components.as_mut() {
             components.add_security_scheme(
                 "bearer_auth",
-                utoipa::openapi::security::SecurityScheme::Http(
-                    utoipa::openapi::security::Http::new(
-                        utoipa::openapi::security::HttpAuthScheme::Bearer,
-                    ),
-                ),
+                SecurityScheme::Http(utoipa::openapi::security::Http::new(
+                    utoipa::openapi::security::HttpAuthScheme::Bearer,
+                )),
             );
         }
     }
 }
 
-// TODO: Revisit worker_threads and sgx.max_threads when adding blocking work or queues.
-// Service entrypoint: build router, set up TLS, and serve.
+// ============================================================================
+// Application Entry Point
+// ============================================================================
+
+/// Service entrypoint: build router, set up TLS, and serve.
+///
+/// # Threading
+///
+/// Uses 2 worker threads to keep SGX thread budget predictable.
+/// Account for: 4 Gramine helper threads + 2 Tokio workers when setting `sgx.max_threads`.
 #[tokio::main(worker_threads = 2)]
 async fn main() {
-    // Capture process start for uptime.
+    // Capture process start for uptime reporting.
     let _ = STARTED_AT.set(Instant::now());
+
+    // Initialize enclave keypair.
     let _ = enclave_key();
 
     println!("JWT validation enabled with JWKS from: {}", AVS_JWKS_URL);
 
+    // Create shared application state.
     let state = AppState {
         audience: AVS_AUDIENCE.to_string(),
         jwks_cache: Arc::new(RwLock::new(None)),
     };
 
-    // Minimal router with health endpoints and docs.
+    // Build the router with all endpoints.
     let app = Router::new()
+        // Health endpoints (unversioned for k8s probes).
         .route("/health", get(health))
-        .route("/health/live", get(health_live))
-        .route("/health/ready", get(health_ready))
-        .route("/attestation/public-key", get(attestation_public_key))
-        .route("/protected", get(protected))
-        .route("/admin/status", get(admin_status))
-        .route("/data/upload", post(data_upload))
-        .route("/data/query", get(data_query))
+        .route("/health/live", get(liveness))
+        .route("/health/ready", get(readiness))
+        // v1 API endpoints.
+        .route("/v1/attestation/public-key", get(get_public_key))
+        .route("/v1/protected", get(protected))
+        .route("/v1/admin/status", get(admin_status))
+        .route("/v1/data/upload", post(data_upload))
+        .route("/v1/data/query", get(data_query))
+        // OpenAPI documentation.
         .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
         .with_state(state);
 
@@ -686,18 +192,20 @@ async fn main() {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 8080));
     println!("listening on {}", addr);
 
-    // Start serving requests over TLS if cert/key are available.
     // TLS is required for RA-TLS deployments.
-    let tls_cert = DEFAULT_TLS_CERT_PATH.to_string();
-    let tls_key = DEFAULT_TLS_KEY_PATH.to_string();
     let tls_paths_exist = std::path::Path::new(DEFAULT_TLS_CERT_PATH).exists()
         && std::path::Path::new(DEFAULT_TLS_KEY_PATH).exists();
 
     if tls_paths_exist {
+        // Install rustls crypto provider.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let tls_config = load_tls_config(&tls_cert, &tls_key)
+
+        // Load TLS configuration.
+        let tls_config = load_tls_config(DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH)
             .await
             .expect("failed to load TLS cert/key");
+
+        // Start HTTPS server.
         axum_server::bind_rustls(addr, tls_config)
             .serve(app.into_make_service())
             .await
@@ -705,50 +213,4 @@ async fn main() {
     } else {
         panic!("TLS cert/key not available; RA-TLS requires TLS");
     }
-}
-
-// Load TLS configuration from PEM or DER, falling back between formats.
-// This handles both gramine-ratls PEM output and DER-only scenarios.
-async fn load_tls_config(
-    cert_path: &str,
-    key_path: &str,
-) -> io::Result<axum_server::tls_rustls::RustlsConfig> {
-    let cert = tokio::fs::read(cert_path).await?;
-    let key = tokio::fs::read(key_path).await?;
-    let cert = normalize_ratls_pem_cert(cert);
-
-    match axum_server::tls_rustls::RustlsConfig::from_pem(cert.clone(), key.clone()).await {
-        Ok(config) => Ok(config),
-        Err(pem_err) => {
-            let der_err = axum_server::tls_rustls::RustlsConfig::from_der(vec![cert], key).await;
-            match der_err {
-                Ok(config) => Ok(config),
-                Err(der_err) => Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "failed to parse TLS cert/key as PEM ({pem_err}) or DER ({der_err})"
-                    ),
-                )),
-            }
-        }
-    }
-}
-
-// gramine-ratls emits \"TRUSTED CERTIFICATE\" PEM labels; rustls expects \"CERTIFICATE\".
-// Rewrite the PEM headers so rustls can parse the self-signed RA-TLS cert.
-fn normalize_ratls_pem_cert(cert: Vec<u8>) -> Vec<u8> {
-    const TRUSTED_BEGIN: &str = "-----BEGIN TRUSTED CERTIFICATE-----";
-    const TRUSTED_END: &str = "-----END TRUSTED CERTIFICATE-----";
-    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
-    const END: &str = "-----END CERTIFICATE-----";
-
-    let Ok(text) = std::str::from_utf8(&cert) else {
-        return cert;
-    };
-    if !text.contains(TRUSTED_BEGIN) {
-        return cert;
-    }
-    text.replace(TRUSTED_BEGIN, BEGIN)
-        .replace(TRUSTED_END, END)
-        .into_bytes()
 }
