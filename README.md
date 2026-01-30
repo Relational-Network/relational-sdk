@@ -83,20 +83,52 @@ curl -sk https://127.0.0.1:8080/health
 curl -sk https://127.0.0.1:8080/v1/attestation/public-key | jq
 ```
 
-## CI/CD
+## Deployment
 
-This repo uses GitHub Actions:
+### ⚠️ No CI/CD - Manual Deployment Required
 
-- **CI** (`.github/workflows/ci.yml`): Runs on push/PR to main/staging
-  - Lint (rustfmt, clippy)
-  - Test
-  - Build release binary
-  - Security audit
+**relational-sdk requires SGX hardware to build and run.** Unlike AVS, there is no automated CI/CD pipeline. You must build and deploy manually on an SGX-capable machine.
 
-- **CD** (`.github/workflows/cd-staging.yml`): Runs on push to staging
-  - Build Docker image with SGX support
-  - Push to GHCR
-  - Deploy to staging SGX VM
+### Deploy to Staging VM
+
+SSH into the staging VM and run:
+
+```bash
+# 1. Clone the repo
+cd /opt
+sudo git clone https://github.com/Relational-Network/relational-sdk.git
+cd relational-sdk
+
+# 2. Install Rust (if not installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# 3. Build the enclave
+make SGX=1 RA_TYPE=dcap
+
+# 4. Extract and record measurements
+gramine-sgx-sigstruct-view relational-sdk.sig
+# Note: MRENCLAVE and MRSIGNER values - update AVS config if changed
+
+# 5. Test locally
+gramine-sgx relational-sdk &
+curl -sk https://127.0.0.1:8080/health
+
+# 6. If using systemd, restart the service
+sudo systemctl restart enclave
+```
+
+### Update AVS with New Measurements
+
+After building, if MRENCLAVE changed, update AVS config:
+
+```bash
+# On staging VM
+sudo nano /opt/iob-micres/.env
+# Update AVS_EXPECTED_MRENCLAVE=<new_value>
+
+sudo systemctl restart avs
+```
 
 ### Required Secrets
 
