@@ -250,14 +250,12 @@ impl FromRequestParts<AppState> for TokenData {
                 )
             })?;
 
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({"error": "invalid authorization header format"})),
-                )
-            })?;
+        let token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid authorization header format"})),
+            )
+        })?;
 
         validate_token(state, token).await.map_err(|e| {
             (

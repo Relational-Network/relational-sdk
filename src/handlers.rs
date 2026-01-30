@@ -202,9 +202,7 @@ pub struct DataQueryResponse {
         (status = 403, description = "Forbidden - read_only role required")
     )
 )]
-pub async fn data_query(
-    ReadOnlyToken(token): ReadOnlyToken,
-) -> Json<DataQueryResponse> {
+pub async fn data_query(ReadOnlyToken(token): ReadOnlyToken) -> Json<DataQueryResponse> {
     // TODO: Implement secure query execution:
     // 1. Parse query parameters (add query params to endpoint if needed)
     // 2. Execute query against enclave-protected data store
