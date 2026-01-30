@@ -1,0 +1,22 @@
+# Docker ignore for relational-sdk build context
+target/
+.git/
+.github/
+.gitignore
+*.md
+!README.md
+.env
+.env.*
+*.pem
+*.key
+
+# SGX artifacts (regenerated in container)
+*.sig
+*.manifest
+*.manifest.sgx
+
+# Attestation client (not needed in container)
+attestation-client/
+
+# Local data directory
+data/

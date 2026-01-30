@@ -11,14 +11,145 @@ SGX enclave server with RA-TLS, JWT validation, and role-based access control (R
 
 ## Build
 
+### Native (requires SGX hardware)
+
 ```bash
+# Build and sign enclave
 make SGX=1 RA_TYPE=dcap
+
+# Run
+gramine-sgx relational-sdk
 ```
 
-## Run
+### Docker (requires SGX hardware)
+
+> **Note:** The Docker image is based on Ubuntu 20.04 (focal) for compatibility with
+> Gramine, Intel SGX, and Azure DCAP libraries.
 
 ```bash
-gramine-sgx relational-sdk
+# Build Docker image
+make docker-build
+
+# Run container (requires SGX devices)
+make docker-run
+
+# Stop container
+make docker-stop
+```
+
+Manual Docker run with host networking (recommended for E2E testing):
+
+```bash
+docker run --rm -d \
+  --name relational-sdk-sgx \
+  --network host \
+  --device /dev/sgx/enclave \
+  --device /dev/sgx/provision \
+  -v "$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
+  -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
+  -e AVS_JWKS_URL=https://127.0.0.1:9100/.well-known/jwks.json \
+  relationalnetwork/relational-sdk:focal
+```
+
+Manual Docker run with port mapping:
+
+```bash
+docker run --rm -it \
+  --name relational-sdk-sgx \
+  --device /dev/sgx/enclave \
+  --device /dev/sgx/provision \
+  -p 8080:8080 \
+  -v "$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
+  -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
+  -e AVS_JWKS_URL=https://your-avs-host:9100/.well-known/jwks.json \
+  relationalnetwork/relational-sdk:focal
+```
+
+### Quick E2E Test (with HTTPS AVS)
+
+```bash
+# 1. Build and run enclave container (with HTTPS AVS JWKS URL)
+docker run --rm -d --name enclave --network host \
+  --device /dev/sgx/enclave --device /dev/sgx/provision \
+  -v "$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
+  -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
+  -e AVS_JWKS_URL=https://127.0.0.1:9100/.well-known/jwks.json \
+  relationalnetwork/relational-sdk:focal
+
+# 2. Test health
+curl -sk https://127.0.0.1:8080/health
+
+# 3. Get enclave public key
+curl -sk https://127.0.0.1:8080/v1/attestation/public-key | jq
+```
+
+## CI/CD
+
+This repo uses GitHub Actions:
+
+- **CI** (`.github/workflows/ci.yml`): Runs on push/PR to main/staging
+  - Lint (rustfmt, clippy)
+  - Test
+  - Build release binary
+  - Security audit
+
+- **CD** (`.github/workflows/cd-staging.yml`): Runs on push to staging
+  - Build Docker image with SGX support
+  - Push to GHCR
+  - Deploy to staging SGX VM
+
+### Required Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `GITHUB_TOKEN` | Automatic, for GHCR |
+| `STAGING_SGX_HOST` | (optional) SSH host for SGX VM deployment |
+
+### Enclave Signing
+
+SGX enclaves must be signed before running. The signing key should be kept secure and NOT committed to git.
+
+```bash
+# Generate signing key (one-time, keep secure)
+gramine-sgx-gen-private-key ~/.config/gramine/enclave-key.pem
+
+# View enclave measurements after build
+make show-measurements
+```
+
+## SGX VM Requirements
+
+Install required dependencies on SGX-capable VM:
+
+```bash
+# Gramine repository
+sudo curl -fsSLo /usr/share/keyrings/gramine-keyring.gpg \
+  https://packages.gramineproject.io/gramine-keyring.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gramine-keyring.gpg] \
+  https://packages.gramineproject.io/ $(lsb_release -sc) main" \
+  | sudo tee /etc/apt/sources.list.d/gramine.list
+
+# Intel SGX repository
+sudo curl -fsSLo /usr/share/keyrings/intel-sgx-deb.asc \
+  https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-sgx-deb.asc] \
+  https://download.01.org/intel-sgx/sgx_repo/ubuntu $(lsb_release -sc) main" \
+  | sudo tee /etc/apt/sources.list.d/intel-sgx.list
+
+# Azure DCAP client (for Azure DCsv3 VMs)
+wget -qO- https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add
+sudo add-apt-repository "deb [arch=amd64] https://packages.microsoft.com/ubuntu/$(lsb_release -rs)/prod $(lsb_release -cs) main"
+
+# Install packages
+sudo apt-get update
+sudo apt-get install -y \
+  gramine \
+  gramine-ratls-dcap \
+  sgx-aesm-service \
+  libsgx-aesm-ecdsa-plugin \
+  libsgx-aesm-quote-ex-plugin \
+  az-dcap-client \
+  gcc make pkg-config libssl-dev libffi-dev
 ```
 
 ## Endpoints
@@ -75,8 +206,8 @@ Roles follow a hierarchy where higher roles include lower permissions:
 ### Example: Calling Protected Endpoints
 
 ```bash
-# 1. Get attestation token from AVS
-TOKEN=$(curl -s -X POST http://127.0.0.1:9100/v1/attest \
+# 1. Get attestation token from AVS (use HTTPS if AVS is in HTTPS mode)
+TOKEN=$(curl -sk -X POST https://127.0.0.1:9100/v1/attest \
   -H 'Content-Type: application/json' \
   -d '{"enclave_url":"https://127.0.0.1:8080","user_id":"alice","role":"admin"}' \
   | jq -r '.token')
@@ -103,9 +234,13 @@ curl -sk https://127.0.0.1:8080/v1/data/query \
 ### JWKS Caching
 
 The enclave caches JWKS from AVS with a 5-minute TTL:
-- Fetched from `http://127.0.0.1:9100/.well-known/jwks.json`
+- Default URL: `http://127.0.0.1:9100/.well-known/jwks.json`
+- Configure via `AVS_JWKS_URL` environment variable for HTTPS:
+  ```bash
+  export AVS_JWKS_URL=https://avs.example.com/.well-known/jwks.json
+  ```
 - Automatically refreshed when TTL expires
-- Configure via `AVS_JWKS_URL` environment variable (future)
+- Supports self-signed certificates for development
 
 ## Configuration
 
@@ -116,6 +251,7 @@ The enclave caches JWKS from AVS with a 5-minute TTL:
 | `TLS_CERT_PATH` | `/tmp/ra-tls.crt.pem` | RA-TLS certificate path |
 | `TLS_KEY_PATH` | `/tmp/ra-tls.key.pem` | RA-TLS private key path |
 | `DATA_DIR` | (none) | If set, readiness verifies directory exists |
+| `AVS_JWKS_URL` | `http://127.0.0.1:9100/.well-known/jwks.json` | AVS JWKS endpoint for token validation |
 
 Note: `0.0.0.0` is a bind address, not a browser URL. Use `https://127.0.0.1:8080/docs`
 or `https://<vm-ip>:8080/docs` depending on where you're accessing the server from.

@@ -3,12 +3,19 @@
 
 //! Configuration constants for the relational-sdk enclave service.
 
+use std::env;
+
 /// Environment variable for optional data directory readiness check.
 pub const DATA_DIR_ENV: &str = "DATA_DIR";
 
-/// AVS JWKS URL for token verification.
-/// The enclave fetches signing keys from this endpoint to validate JWTs.
-pub const AVS_JWKS_URL: &str = "http://127.0.0.1:9100/.well-known/jwks.json";
+/// Default AVS JWKS URL for token verification.
+/// Override with AVS_JWKS_URL environment variable.
+pub const DEFAULT_AVS_JWKS_URL: &str = "http://127.0.0.1:9100/.well-known/jwks.json";
+
+/// Get AVS JWKS URL from environment or use default.
+pub fn avs_jwks_url() -> String {
+    env::var("AVS_JWKS_URL").unwrap_or_else(|_| DEFAULT_AVS_JWKS_URL.to_string())
+}
 
 /// Expected audience claim in AVS-issued tokens.
 /// Tokens must have this value in the `aud` claim to be accepted.

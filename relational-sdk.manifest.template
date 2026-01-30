@@ -1,46 +1,71 @@
-# SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2023 Gramine contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Relational Network
 
-# Rust manifest for Relational SDK
+# Rust server manifest with DCAP RA-TLS attestation
+# This manifest configures the server to run inside an SGX enclave with
+# remote attestation using DCAP (Data Center Attestation Primitives).
 
-loader.argv = [
-  "gramine-ratls", "-P", "/tmp/ra-tls.crt.pem", "/tmp/ra-tls.key.pem", "--",
-  "{{ self_exe }}",
-]
-libos.entrypoint = "/gramine-ratls"
+# Use gramine-ratls as the entrypoint to generate RA-TLS credentials before
+# launching the actual application. The -P flag writes the private key
+# unencrypted (required for rustls to load it).
+libos.entrypoint = "{{ entrypoint }}"
+
 loader.log_level = "{{ log_level }}"
 
-loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr{{ arch_libdir }}"
+# Arguments for gramine-ratls:
+# -P: Write private key in plain (unencrypted) PEM format
+# /tmp/ra-tls.crt.pem: Output path for the certificate
+# /tmp/ra-tls.key.pem: Output path for the private key
+# --: Separator before the actual application command
+# {{ self_exe }}: The Rust server binary to execute after TLS setup
+loader.argv = [
+    "gramine-ratls", "-P",
+    "/tmp/ra-tls.crt.pem",
+    "/tmp/ra-tls.key.pem",
+    "--",
+    "{{ self_exe }}"
+]
+
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}"
+loader.env.HOST = "0.0.0.0"
+loader.env.PORT = "8080"
+
+# AVS URL for JWT validation (passthrough from container env)
+loader.env.AVS_JWKS_URL = { passthrough = true }
 
 # See https://gramine.readthedocs.io/en/stable/performance.html#glibc-malloc-tuning
 loader.env.MALLOC_ARENA_MAX = "1"
 
-# For easier debugging — not strictly required to run this workload
+# For easier debugging - not strictly required to run this workload
 loader.env.RUST_BACKTRACE = "full"
 
 fs.mounts = [
-  { path = "/gramine-ratls", uri = "file:{{ entrypoint }}" },
-  { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
-  { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
-  { path = "/usr{{ arch_libdir }}", uri = "file:/usr{{ arch_libdir }}" },
-  { path = "/tmp", type = "tmpfs" },
+    { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+    { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
+    # tmpfs mount for RA-TLS certificate and key generation
+    { path = "/tmp", type = "tmpfs" },
+    # gramine-ratls binary location (passed via -Dentrypoint)
+    { path = "{{ entrypoint }}", uri = "file:{{ entrypoint }}" },
+    # Application directory
+    { path = "{{ app_dir }}", uri = "file:{{ app_dir }}" },
 ]
 
+# SGX configuration - DCAP attestation is mandatory
 sgx.debug = true
-sgx.edmm_enable = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
 sgx.remote_attestation = "{{ ra_type }}"
+sgx.isvprodid = {{ isvprodid }}
+sgx.isvsvn = {{ isvsvn }}
+sgx.edmm_enable = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
 
 # `use_exinfo = true` is needed because the application may trigger lazy allocation of pages
 # (through exception handling) when EDMM is enabled
 sgx.use_exinfo = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
 
 sgx.trusted_files = [
-  "file:{{ entrypoint }}",
-  "file:{{ self_exe }}",
-  "file:{{ gramine.runtimedir() }}/",
-  "file:{{ arch_libdir }}/",
-  "file:/usr{{ arch_libdir }}/",
+    "file:{{ self_exe }}",
+    "file:{{ gramine.runtimedir() }}/",
+    "file:{{ arch_libdir }}/",
+    "file:{{ entrypoint }}",
 ]
 
 # The maximum number of threads in a single process needs to be declared in advance.
@@ -48,6 +73,6 @@ sgx.trusted_files = [
 # - one main thread
 # - the tokio worker threads
 # - any threads and threadpools you might be starting
-# - helper threads internal to Gramine — see:
+# - helper threads internal to Gramine - see:
 #   https://gramine.readthedocs.io/en/stable/manifest-syntax.html#number-of-threads
 sgx.max_threads = {{ '1' if env.get('EDMM', '0') == '1' else '8' }}

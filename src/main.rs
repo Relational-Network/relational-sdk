@@ -41,7 +41,7 @@ use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
 
 use auth::AppState;
-use config::{AVS_AUDIENCE, AVS_JWKS_URL, DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH};
+use config::{avs_jwks_url, AVS_AUDIENCE, DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH};
 use crypto::enclave_key;
 use handlers::{
     admin_status, data_query, data_upload, get_public_key, protected, AdminStatusResponse,
@@ -164,7 +164,7 @@ async fn main() {
     // Initialize enclave keypair.
     let _ = enclave_key();
 
-    println!("JWT validation enabled with JWKS from: {}", AVS_JWKS_URL);
+    println!("JWT validation enabled with JWKS from: {}", avs_jwks_url());
 
     // Create shared application state.
     let state = AppState {

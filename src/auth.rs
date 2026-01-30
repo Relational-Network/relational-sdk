@@ -41,7 +41,7 @@ use serde::Deserialize;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use crate::config::{AVS_JWKS_URL, JWKS_CACHE_TTL_SECS};
+use crate::config::{avs_jwks_url, JWKS_CACHE_TTL_SECS};
 use crate::crypto::JwksResponse;
 
 /// Claims from AVS-issued attestation tokens.
@@ -118,7 +118,17 @@ pub struct AppState {
 
 /// Fetch JWKS from AVS and parse the decoding keys.
 pub async fn fetch_jwks(url: &str) -> Result<Vec<(String, DecodingKey)>, String> {
-    let response = reqwest::get(url)
+    // Build HTTP client that accepts self-signed certs for HTTPS
+    // (AVS may use self-signed cert in development/staging)
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+
+    let response = client
+        .get(url)
+        .send()
         .await
         .map_err(|e| format!("failed to fetch JWKS: {e}"))?;
     let jwks: JwksResponse = response
@@ -162,7 +172,8 @@ pub async fn get_decoding_keys(state: &AppState) -> Result<Vec<(String, Decoding
     }
 
     // Fetch and update cache.
-    let keys = fetch_jwks(AVS_JWKS_URL).await?;
+    let url = avs_jwks_url();
+    let keys = fetch_jwks(&url).await?;
     {
         let mut cache = state.jwks_cache.write().unwrap();
         *cache = Some(JwksCache {

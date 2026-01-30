@@ -59,6 +59,27 @@ clean:
 	$(RM) -rf *.sig *.manifest.sgx *.manifest
 	$(MAKE) -C attestation-client clean
 
+##################### DOCKER BUILD AND RUN ###################################
+
+.PHONY: docker-build
+docker-build:
+	cd docker && sudo ./build.sh ubuntu20
+
+.PHONY: docker-run
+docker-run:
+	sudo docker run --rm -it \
+		--name relational-sdk-sgx \
+		--device /dev/sgx/enclave \
+		--device /dev/sgx/provision \
+		-p 8080:8080 \
+		-v "$$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
+		-e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
+		relationalnetwork/relational-sdk:focal
+
+.PHONY: docker-stop
+docker-stop:
+	sudo docker stop relational-sdk-sgx
+
 ##################### REMOTE ATTESTATION CLIENT ##############################
 
 # Build attestation client
