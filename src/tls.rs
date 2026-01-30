@@ -26,10 +26,9 @@ pub async fn load_tls_config(
         Err(pem_err) => {
             match axum_server::tls_rustls::RustlsConfig::from_der(vec![cert], key).await {
                 Ok(config) => Ok(config),
-                Err(der_err) => Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("failed to parse TLS cert/key as PEM ({pem_err}) or DER ({der_err})"),
-                )),
+                Err(der_err) => Err(std::io::Error::other(format!(
+                    "failed to parse TLS cert/key as PEM ({pem_err}) or DER ({der_err})"
+                ))),
             }
         }
     }

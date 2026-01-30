@@ -46,8 +46,6 @@ fs.mounts = [
     { path = "/tmp", type = "tmpfs" },
     # gramine-ratls binary location (passed via -Dentrypoint)
     { path = "{{ entrypoint }}", uri = "file:{{ entrypoint }}" },
-    # Application directory
-    { path = "{{ app_dir }}", uri = "file:{{ app_dir }}" },
 ]
 
 # SGX configuration - DCAP attestation is mandatory
