@@ -49,6 +49,17 @@ fs.mounts = [
     # Application directory mount (for self_exe binary)
     # In Docker: app_dir=/app, native: app_dir=. (current directory)
     { path = "{{ app_dir }}", uri = "file:{{ app_dir }}" },
+
+    # ========== ENCRYPTED PERSISTENT STORAGE ==========
+    # All persistent state MUST live under /data
+    # - Files are encrypted on the host filesystem
+    # - Files are transparently decrypted inside the enclave
+    # - Encryption keys are derived by Gramine (bound to enclave identity)
+    # - Using _sgx_mrsigner allows same-signer enclaves to access data (upgrade-safe)
+    #
+    # The Rust application uses normal filesystem I/O.
+    # DO NOT implement crypto in Rust for storage - Gramine owns all at-rest encryption.
+    { path = "/data", uri = "file:{{ data_dir }}", type = "encrypted", key_name = "_sgx_mrsigner" },
 ]
 
 # SGX configuration - DCAP attestation is mandatory

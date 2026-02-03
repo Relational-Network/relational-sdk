@@ -10,9 +10,11 @@ DOCKER ?= 0
 ifeq ($(DOCKER),1)
     APP_DIR ?= /app
     SELF_EXE ?= /app/relational-sdk
+    DATA_DIR ?= /app/data
 else
     APP_DIR ?= $(shell pwd)
     SELF_EXE ?= target/release/relational-sdk
+    DATA_DIR ?= $(shell pwd)/data
 endif
 
 RA_TYPE ?= dcap
@@ -41,12 +43,14 @@ relational-sdk.manifest: relational-sdk.manifest.template $(SELF_EXE)
 		echo "error: gramine-ratls not found; set ENTRYPOINT=/path/to/gramine-ratls"; \
 		exit 1; \
 	fi
+	@mkdir -p $(DATA_DIR)
 	gramine-manifest \
 		-Dentrypoint=$(ENTRYPOINT) \
 		-Dlog_level=$(GRAMINE_LOG_LEVEL) \
 		-Darch_libdir=$(ARCH_LIBDIR) \
 		-Dapp_dir=$(APP_DIR) \
 		-Dself_exe=$(SELF_EXE) \
+		-Ddata_dir=$(DATA_DIR) \
 		-Dra_type=$(RA_TYPE) \
 		-Disvprodid=$(ISVPRODID) \
 		-Disvsvn=$(ISVSVN) \

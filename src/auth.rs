@@ -40,8 +40,9 @@ use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
+use tracing::{debug, info, warn};
 
-use crate::config::{avs_jwks_url, JWKS_CACHE_TTL_SECS};
+use crate::config::{avs_jwks_url, AVS_ISSUER, JWKS_CACHE_TTL_SECS};
 use crate::crypto::JwksResponse;
 
 /// Claims from AVS-issued attestation tokens.
@@ -190,38 +191,60 @@ pub async fn get_decoding_keys(state: &AppState) -> Result<Vec<(String, Decoding
 /// - Token signature using AVS JWKS
 /// - Expiration time (`exp` claim)
 /// - Audience (`aud` claim matches configured audience)
+/// - Issuer (`iss` claim matches expected AVS issuer)
 pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenData, String> {
     let keys = get_decoding_keys(state).await?;
     if keys.is_empty() {
+        warn!("JWKS contains no valid keys");
         return Err("no valid keys in JWKS".to_string());
     }
 
     // Decode header to find kid.
-    let header = decode_header(token).map_err(|e| format!("invalid token header: {e}"))?;
+    let header = decode_header(token).map_err(|e| {
+        warn!(error = %e, "Invalid token header");
+        format!("invalid token header: {e}")
+    })?;
     let kid = header.kid.as_deref();
+    debug!(kid = ?kid, "Validating token");
 
     // Find matching key or try first key.
     let decoding_key = if let Some(kid) = kid {
         keys.iter()
             .find(|(k, _)| k == kid)
             .map(|(_, key)| key)
-            .ok_or_else(|| format!("no key found for kid: {kid}"))?
+            .ok_or_else(|| {
+                warn!(kid = %kid, "No matching key found in JWKS");
+                format!("no key found for kid: {kid}")
+            })?
     } else {
+        debug!("Token has no kid, using first key from JWKS");
         &keys[0].1
     };
 
     // Configure validation.
     let mut validation = Validation::new(Algorithm::ES256);
     validation.set_audience(&[&state.audience]);
+    validation.set_issuer(&[AVS_ISSUER]);
     validation.validate_exp = true;
 
     let token_data = decode::<AttestationClaims>(token, decoding_key, &validation)
-        .map_err(|e| format!("token validation failed: {e}"))?;
+        .map_err(|e| {
+            warn!(error = %e, "Token validation failed");
+            format!("token validation failed: {e}")
+        })?;
 
-    Ok(TokenData {
-        sub: token_data.claims.sub,
-        role: token_data.claims.role.unwrap_or_else(|| "user".to_string()),
-    })
+    let result = TokenData {
+        sub: token_data.claims.sub.clone(),
+        role: token_data.claims.role.clone().unwrap_or_else(|| "user".to_string()),
+    };
+
+    info!(
+        sub = %result.sub,
+        role = %result.role,
+        "Token validated successfully"
+    );
+
+    Ok(result)
 }
 
 // ============================================================================

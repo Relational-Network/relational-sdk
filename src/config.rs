@@ -21,6 +21,10 @@ pub fn avs_jwks_url() -> String {
 /// Tokens must have this value in the `aud` claim to be accepted.
 pub const AVS_AUDIENCE: &str = "relational-sdk";
 
+/// Expected issuer claim in AVS-issued tokens.
+/// Tokens must have this value in the `iss` claim to be accepted.
+pub const AVS_ISSUER: &str = "attestation-verification-service";
+
 /// Fixed RA-TLS certificate location written by gramine-ratls (tmpfs).
 pub const DEFAULT_TLS_CERT_PATH: &str = "/tmp/ra-tls.crt.pem";
 

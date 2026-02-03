@@ -37,6 +37,8 @@ use axum::{
 };
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -158,13 +160,21 @@ impl Modify for SecurityAddon {
 /// Account for: 4 Gramine helper threads + 2 Tokio workers when setting `sgx.max_threads`.
 #[tokio::main(worker_threads = 2)]
 async fn main() {
+    // Initialize tracing with environment filter (RUST_LOG).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_target(true)
+        .init();
+
     // Capture process start for uptime reporting.
     let _ = STARTED_AT.set(Instant::now());
 
     // Initialize enclave keypair.
     let _ = enclave_key();
 
-    println!("JWT validation enabled with JWKS from: {}", avs_jwks_url());
+    info!(jwks_url = %avs_jwks_url(), "JWT validation enabled");
 
     // Create shared application state.
     let state = AppState {
@@ -190,7 +200,7 @@ async fn main() {
 
     // Bind on all interfaces for VM access.
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 8080));
-    println!("listening on {}", addr);
+    info!(%addr, "Starting HTTPS server");
 
     // TLS is required for RA-TLS deployments.
     let tls_paths_exist = std::path::Path::new(DEFAULT_TLS_CERT_PATH).exists()
