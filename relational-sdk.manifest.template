@@ -46,6 +46,9 @@ fs.mounts = [
     { path = "/tmp", type = "tmpfs" },
     # gramine-ratls binary location (passed via -Dentrypoint)
     { path = "{{ entrypoint }}", uri = "file:{{ entrypoint }}" },
+    # Application directory mount (for self_exe binary)
+    # In Docker: app_dir=/app, native: app_dir=. (current directory)
+    { path = "{{ app_dir }}", uri = "file:{{ app_dir }}" },
 ]
 
 # SGX configuration - DCAP attestation is mandatory

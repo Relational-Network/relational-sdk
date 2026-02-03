@@ -85,13 +85,91 @@ curl -sk https://127.0.0.1:8080/v1/attestation/public-key | jq
 
 ## Deployment
 
-### ⚠️ No CI/CD - Manual Deployment Required
+### ✅ Automated CI/CD via Staging VM
 
-**relational-sdk requires SGX hardware to build and run.** Unlike AVS, there is no automated CI/CD pipeline. You must build and deploy manually on an SGX-capable machine.
+**relational-sdk requires SGX hardware to build.** CI/CD builds on the staging VM (which has SGX) and pushes to GHCR.
 
-### Deploy to Staging VM
+- **CI** (`.github/workflows/ci.yml`): Lint, test (non-SGX) on push/PR  
+- **CD** (`.github/workflows/cd-staging.yml`): SSH to staging → build Docker → push to GHCR → deploy
+- **Trigger**: Push to `staging` branch
+- **Image**: `ghcr.io/relational-network/relational-sdk:staging-latest`
+
+### Staging Deployment
+
+**Live URL:** https://iob-staging.duckdns.org (via Caddy reverse proxy)
+
+**VM:** Azure DCsv3 (`iob-staging` in resource group `iob`)
+
+**Automated Deployment:**
+```bash
+# Push to staging branch triggers CD
+git checkout staging
+git merge main
+git push origin staging
+# CD workflow: builds on VM → pushes to GHCR → restarts service → verifies health
+```
+
+**Manual Deployment (if needed):**
+```bash
+# SSH into staging VM
+ssh azureuser@20.86.174.127
+
+# Run deployment script
+cd /opt/relational-sdk
+./scripts/deploy-staging.sh
+```
+
+The CD workflow / script will:
+1. Pull latest code from git
+2. Build Docker image with SGX support
+3. Push image to GHCR
+4. Extract and validate measurements (MRSIGNER change = failure)
+5. Update `/opt/iob-micres/.env` with new MRENCLAVE
+6. Restart enclave and AVS services
+7. Verify health and attestation
+
+### Systemd Service (Docker-based)
+
+The enclave runs as a Docker container managed by systemd:
+
+```bash
+# Install service file
+sudo cp scripts/enclave.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable enclave
+sudo systemctl start enclave
+
+# View logs
+sudo journalctl -u enclave -f
+
+# Status
+sudo systemctl status enclave
+```
+
+### Manual Docker Run (for testing)
 
 SSH into the staging VM and run:
+
+```bash
+# 1. Pull the image
+docker pull ghcr.io/relational-network/relational-sdk:staging-latest
+
+# 2. Run container
+docker run --rm -d --name enclave \
+  --network host \
+  --device /dev/sgx/enclave \
+  --device /dev/sgx/provision \
+  -v /opt/iob-micres/secrets/enclave-key.pem:/keys/enclave-key.pem:ro \
+  -v /opt/iob-micres/data:/data \
+  -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
+  -e AVS_JWKS_URL=http://127.0.0.1:9100/.well-known/jwks.json \
+  ghcr.io/relational-network/relational-sdk:staging-latest
+
+# 3. Verify
+curl -sk https://127.0.0.1:8080/health
+```
+
+### Build from Source on Staging VM (if needed)
 
 ```bash
 # 1. Clone the repo
@@ -130,12 +208,14 @@ sudo nano /opt/iob-micres/.env
 sudo systemctl restart avs
 ```
 
-### Required Secrets
+### Required GitHub Secrets (for CI/CD)
 
 | Secret | Description |
 |--------|-------------|
-| `GITHUB_TOKEN` | Automatic, for GHCR |
-| `STAGING_SGX_HOST` | (optional) SSH host for SGX VM deployment |
+| `STAGING_HOST` | Staging VM IP (20.86.174.127) |
+| `STAGING_USER` | SSH user (azureuser) |
+| `STAGING_SSH_KEY` | SSH private key for staging VM |
+| `GHCR_TOKEN` | PAT with `read:packages`, `write:packages` |
 
 ### Enclave Signing
 
@@ -376,6 +456,12 @@ The codebase is organized into logical modules:
 | `handlers.rs` | HTTP request handlers |
 | `health.rs` | Health check endpoints |
 | `tls.rs` | TLS utilities and PEM normalization |
+
+## Related Documentation
+
+- [STAGING-DEPLOYMENT.md](../STAGING-DEPLOYMENT.md) - Full staging deployment guide
+- [AGENTS.md](../AGENTS.md) - Architecture and development context
+- [scripts/deploy-staging.sh](scripts/deploy-staging.sh) - Automated staging deployment script
 
 ## License
 

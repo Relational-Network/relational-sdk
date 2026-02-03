@@ -5,7 +5,15 @@
 ARCH_LIBDIR ?= /lib/$(shell $(CC) -dumpmachine)
 ENTRYPOINT ?= $(firstword $(wildcard /usr/bin/gramine-ratls /usr/local/bin/gramine-ratls /bin/gramine-ratls))
 
-SELF_EXE = target/release/relational-sdk
+# Docker mode: set DOCKER=1 to use /app paths instead of local paths
+DOCKER ?= 0
+ifeq ($(DOCKER),1)
+    APP_DIR ?= /app
+    SELF_EXE ?= /app/relational-sdk
+else
+    APP_DIR ?= $(shell pwd)
+    SELF_EXE ?= target/release/relational-sdk
+endif
 
 RA_TYPE ?= dcap
 ISVPRODID ?= 0
@@ -37,6 +45,7 @@ relational-sdk.manifest: relational-sdk.manifest.template $(SELF_EXE)
 		-Dentrypoint=$(ENTRYPOINT) \
 		-Dlog_level=$(GRAMINE_LOG_LEVEL) \
 		-Darch_libdir=$(ARCH_LIBDIR) \
+		-Dapp_dir=$(APP_DIR) \
 		-Dself_exe=$(SELF_EXE) \
 		-Dra_type=$(RA_TYPE) \
 		-Disvprodid=$(ISVPRODID) \

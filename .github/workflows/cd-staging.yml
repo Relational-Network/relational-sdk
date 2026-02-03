@@ -1,0 +1,251 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Relational Network
+
+name: CD - Staging
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: relational-network/relational-sdk
+
+jobs:
+  check-staging-online:
+    name: Check Staging VM is Online
+    runs-on: ubuntu-latest
+    outputs:
+      online: ${{ steps.check.outputs.online }}
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/staging_key
+          chmod 600 ~/.ssh/staging_key
+
+      - name: Check SSH connectivity
+        id: check
+        timeout-minutes: 2
+        run: |
+          if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
+             -i ~/.ssh/staging_key \
+             ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} \
+             'echo "VM is online"'; then
+            echo "online=true" >> $GITHUB_OUTPUT
+          else
+            echo "online=false" >> $GITHUB_OUTPUT
+            echo "::warning::Staging VM is offline or unreachable"
+          fi
+        continue-on-error: true
+
+      - name: Fail if offline
+        if: steps.check.outputs.online != 'true'
+        run: |
+          echo "::error::Staging VM is not reachable. Is it running?"
+          echo "Start VM with: az vm start -g iob -n iob-staging"
+          exit 1
+
+  build-and-deploy:
+    name: Build and Deploy on Staging
+    runs-on: ubuntu-latest
+    needs: check-staging-online
+    if: needs.check-staging-online.outputs.online == 'true'
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          command_timeout: 30m
+          envs: GHCR_TOKEN
+          script: |
+            set -e
+            
+            echo "=============================================="
+            echo "  relational-sdk CD - Building on Staging"
+            echo "=============================================="
+            
+            # Configuration
+            SDK_DIR="/opt/relational-sdk"
+            ENV_FILE="/opt/iob-micres/.env"
+            SIGNING_KEY="/opt/iob-micres/secrets/enclave-key.pem"
+            IMAGE_NAME="ghcr.io/relational-network/relational-sdk"
+            IMAGE_TAG="staging-latest"
+            
+            # Verify SGX hardware
+            if [ ! -e /dev/sgx/enclave ]; then
+                echo "ERROR: SGX device not found"
+                exit 1
+            fi
+            
+            # Verify signing key
+            if [ ! -f "$SIGNING_KEY" ]; then
+                echo "ERROR: Signing key not found at $SIGNING_KEY"
+                exit 1
+            fi
+            
+            # Clone or pull latest code
+            if [ ! -d "$SDK_DIR" ]; then
+                echo "=== Cloning repository ==="
+                sudo git clone https://github.com/Relational-Network/relational-sdk.git "$SDK_DIR"
+                sudo chown -R $USER:$USER "$SDK_DIR"
+            fi
+            
+            cd "$SDK_DIR"
+            
+            echo "=== Fetching latest code ==="
+            git fetch origin
+            git checkout staging
+            git reset --hard origin/staging
+            
+            echo "=== Stopping current enclave ==="
+            sudo systemctl stop enclave || true
+            sudo docker stop enclave 2>/dev/null || true
+            sudo docker rm enclave 2>/dev/null || true
+            
+            echo "=== Building Docker image ==="
+            sudo docker build \
+                -t ${IMAGE_NAME}:${IMAGE_TAG} \
+                -f docker/Dockerfile \
+                .
+            
+            echo "=== Logging into GHCR ==="
+            echo "$GHCR_TOKEN" | sudo docker login ghcr.io -u relational-network --password-stdin
+            
+            echo "=== Pushing to GHCR ==="
+            sudo docker push ${IMAGE_NAME}:${IMAGE_TAG}
+            
+            echo "=== Extracting measurements ==="
+            # Run container briefly to sign and extract measurements
+            sudo docker run --rm \
+                --device /dev/sgx/enclave \
+                --device /dev/sgx/provision \
+                -v ${SIGNING_KEY}:/keys/enclave-key.pem:ro \
+                -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
+                --entrypoint /bin/bash \
+                ${IMAGE_NAME}:${IMAGE_TAG} \
+                -c "cd /app && gramine-sgx-sign --manifest relational-sdk.manifest --output relational-sdk.manifest.sgx 2>/dev/null && gramine-sgx-sigstruct-view relational-sdk.sig" \
+                > /tmp/measurements.txt 2>&1 || true
+            
+            cat /tmp/measurements.txt
+            
+            MRENCLAVE=$(grep "mr_enclave:" /tmp/measurements.txt | awk '{print $2}' | head -1)
+            MRSIGNER=$(grep "mr_signer:" /tmp/measurements.txt | awk '{print $2}' | head -1)
+            
+            echo ""
+            echo "MRENCLAVE: $MRENCLAVE"
+            echo "MRSIGNER:  $MRSIGNER"
+            
+            # Validate MRSIGNER hasn't changed (indicates signing key mismatch)
+            if [ -f "$ENV_FILE" ]; then
+                EXISTING_MRSIGNER=$(grep "^AVS_EXPECTED_MRSIGNER=" "$ENV_FILE" | cut -d= -f2)
+                if [ -n "$EXISTING_MRSIGNER" ] && [ "$EXISTING_MRSIGNER" != "$MRSIGNER" ]; then
+                    echo ""
+                    echo "::error::MRSIGNER CHANGED! This indicates a signing key mismatch."
+                    echo "Old: $EXISTING_MRSIGNER"
+                    echo "New: $MRSIGNER"
+                    echo "If intentional, update AVS_EXPECTED_MRSIGNER in $ENV_FILE manually."
+                    exit 1
+                fi
+                
+                echo "=== Updating $ENV_FILE with new MRENCLAVE ==="
+                if grep -q "^AVS_EXPECTED_MRENCLAVE=" "$ENV_FILE"; then
+                    sudo sed -i "s/^AVS_EXPECTED_MRENCLAVE=.*/AVS_EXPECTED_MRENCLAVE=$MRENCLAVE/" "$ENV_FILE"
+                else
+                    echo "AVS_EXPECTED_MRENCLAVE=$MRENCLAVE" | sudo tee -a "$ENV_FILE"
+                fi
+            fi
+            
+            echo "=== Starting enclave service ==="
+            sudo systemctl start enclave
+            sleep 15
+            
+            echo "=== Verifying enclave health ==="
+            for i in 1 2 3 4 5; do
+                if curl -sf --max-time 10 -k https://127.0.0.1:8080/health; then
+                    echo ""
+                    echo "Enclave is healthy!"
+                    break
+                fi
+                echo "Waiting for enclave... (attempt $i/5)"
+                sleep 10
+            done
+            
+            curl -sf --max-time 10 -k https://127.0.0.1:8080/health || {
+                echo "Enclave health check failed!"
+                sudo journalctl -u enclave --no-pager -n 50
+                exit 1
+            }
+            
+            echo ""
+            echo "=== Restarting AVS (to load new measurements) ==="
+            sudo systemctl restart avs
+            sleep 10
+            
+            curl -sf --max-time 10 http://127.0.0.1:9100/health || {
+                echo "AVS health check failed!"
+                sudo journalctl -u avs --no-pager -n 50
+                exit 1
+            }
+            
+            echo ""
+            echo "=== Testing attestation ==="
+            ATTEST=$(curl -s --max-time 30 -X POST http://127.0.0.1:9100/v1/attest \
+                -H 'Content-Type: application/json' \
+                -d '{"enclave_url":"https://127.0.0.1:8080","user_id":"cd-test","role":"user"}')
+            
+            if echo "$ATTEST" | grep -q '"token"'; then
+                echo "✅ Attestation successful!"
+            else
+                echo "❌ Attestation failed: $ATTEST"
+                exit 1
+            fi
+            
+            echo ""
+            echo "=== Cleaning up old images ==="
+            sudo docker image prune -f
+            
+            echo ""
+            echo "=============================================="
+            echo "  Deployment Complete!"
+            echo "=============================================="
+            echo "MRENCLAVE: $MRENCLAVE"
+            echo "MRSIGNER:  $MRSIGNER"
+            echo "Image:     ${IMAGE_NAME}:${IMAGE_TAG}"
+
+  verify-public:
+    name: Verify Public Endpoint
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    steps:
+      - name: Wait for services
+        run: sleep 15
+
+      - name: Check public health
+        run: |
+          curl -sf --max-time 30 https://iob-staging.duckdns.org/health || {
+            echo "Public health check failed"
+            exit 1
+          }
+          echo "✅ Public health check passed"
+
+      - name: Check JWKS endpoint
+        run: |
+          curl -sf --max-time 30 https://iob-staging.duckdns.org/.well-known/jwks.json || {
+            echo "JWKS endpoint check failed"
+            exit 1
+          }
+          echo "✅ JWKS endpoint check passed"
+
+      - name: Check enclave public key
+        run: |
+          curl -sf --max-time 30 https://iob-staging.duckdns.org/v1/attestation/public-key || {
+            echo "Enclave public key endpoint check failed"
+            exit 1
+          }
+          echo "✅ Enclave public key endpoint check passed"

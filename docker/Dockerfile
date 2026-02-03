@@ -136,7 +136,8 @@ COPY --from=builder /build/target/release/relational-sdk /app/relational-sdk
 # Copy manifest template
 COPY relational-sdk.manifest.template /app/relational-sdk.manifest.template
 
-# Generate Gramine manifest
+# Generate Gramine manifest using same logic as Makefile (DOCKER=1 mode)
+# This ensures consistency between Docker and native builds
 RUN ENTRYPOINT=$(which gramine-ratls) && \
     gramine-manifest \
     -Dentrypoint=${ENTRYPOINT} \
@@ -144,7 +145,6 @@ RUN ENTRYPOINT=$(which gramine-ratls) && \
     -Darch_libdir=/lib/x86_64-linux-gnu \
     -Dapp_dir=/app \
     -Dself_exe=/app/relational-sdk \
-    -Ddata_dir=/data \
     -Dra_type=dcap \
     -Disvprodid=0 \
     -Disvsvn=0 \
