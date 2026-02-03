@@ -102,4 +102,6 @@ jobs:
 
       - name: Run audit
         run: cargo audit
-        continue-on-error: true
+        # Note: We use P-256 ECDSA only (no RSA) to avoid vulnerabilities like
+        # RUSTSEC-2023-0071. The jsonwebtoken crate is configured with only the
+        # "p256" feature to exclude RSA dependencies entirely.

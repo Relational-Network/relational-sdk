@@ -122,15 +122,22 @@ jobs:
             
             echo "=== Extracting measurements ==="
             # Run container briefly to sign and extract measurements
+            # Note: Must pass --key explicitly since GRAMINE_SGX_SIGNING_KEY env var
+            # is only used by gramine-sgx at runtime, not by gramine-sgx-sign
             sudo docker run --rm \
                 --device /dev/sgx/enclave \
                 --device /dev/sgx/provision \
                 -v ${SIGNING_KEY}:/keys/enclave-key.pem:ro \
-                -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
                 --entrypoint /bin/bash \
                 ${IMAGE_NAME}:${IMAGE_TAG} \
-                -c "cd /app && gramine-sgx-sign --manifest relational-sdk.manifest --output relational-sdk.manifest.sgx 2>/dev/null && gramine-sgx-sigstruct-view relational-sdk.sig" \
-                > /tmp/measurements.txt 2>&1 || true
+                -c "cd /app && gramine-sgx-sign --key /keys/enclave-key.pem --manifest relational-sdk.manifest --output relational-sdk.manifest.sgx && gramine-sgx-sigstruct-view relational-sdk.sig" \
+                > /tmp/measurements.txt 2>&1
+            
+            if [ $? -ne 0 ]; then
+                echo "ERROR: Failed to extract measurements!"
+                cat /tmp/measurements.txt
+                exit 1
+            fi
             
             cat /tmp/measurements.txt
             
