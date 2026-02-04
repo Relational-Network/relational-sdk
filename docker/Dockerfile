@@ -136,15 +136,24 @@ COPY --from=builder /build/target/release/relational-sdk /app/relational-sdk
 # Copy manifest template
 COPY relational-sdk.manifest.template /app/relational-sdk.manifest.template
 
+# SGX_DEBUG: Set to 1 for debug enclaves (NEVER use in production!)
+# Default is 0 (secure production mode). Override at build time:
+#   docker build --build-arg SGX_DEBUG=1 ...
+ARG SGX_DEBUG=0
+
+# data_dir must be explicit path, not env reference
+ARG DATA_DIR=/app/data
+
 # Generate Gramine manifest using same logic as Makefile (DOCKER=1 mode)
 # This ensures consistency between Docker and native builds
 RUN ENTRYPOINT=$(which gramine-ratls) && \
-    gramine-manifest \
+    SGX_DEBUG=${SGX_DEBUG} gramine-manifest \
     -Dentrypoint=${ENTRYPOINT} \
     -Dlog_level=error \
     -Darch_libdir=/lib/x86_64-linux-gnu \
     -Dapp_dir=/app \
     -Dself_exe=/app/relational-sdk \
+    -Ddata_dir=${DATA_DIR} \
     -Dra_type=dcap \
     -Disvprodid=0 \
     -Disvsvn=0 \
