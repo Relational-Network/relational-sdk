@@ -11,15 +11,95 @@ SGX enclave server with RA-TLS, JWT validation, and role-based access control (R
 
 ## Build
 
+### Build Requirements
+
+⚠️ **IMPORTANT:** This project uses `aws-lc-rs` for cryptography, which requires **clang** 
+to compile on Ubuntu 20.04. GCC 9.4 has a memcmp bug that aws-lc-rs refuses to compile against.
+
+```bash
+# Install clang (Ubuntu 20.04)
+sudo apt-get install -y clang
+
+# Native builds require clang
+CC=clang CXX=clang++ make SGX=1 RA_TYPE=dcap
+```
+
+The Docker build already uses clang (configured in Dockerfile).
+
 ### Native (requires SGX hardware)
 
 ```bash
-# Build and sign enclave
-make SGX=1 RA_TYPE=dcap
+# Build and sign enclave (use clang for aws-lc-rs)
+CC=clang CXX=clang++ make SGX=1 RA_TYPE=dcap
+
+# Run (debug mode for development)
+gramine-sgx relational-sdk
+
+# Run (production mode - no debug flag)
+make clean && CC=clang CXX=clang++ make SGX=1 RA_TYPE=dcap SGX_DEBUG=0
+gramine-sgx relational-sdk
+```
+
+## Local Development (Full Stack)
+
+### Prerequisites
+
+- **SGX Hardware**: Azure DCsv3 VM or bare-metal with SGX enabled
+- **Gramine**: `sudo apt install gramine`
+- **Clang**: `sudo apt install clang`
+- **AVS running**: See [attestation-verification-service README](../attestation-verification-service/README.md)
+
+### Quick Start (3 terminals)
+
+**Terminal 1 - AVS:**
+```bash
+cd ../attestation-verification-service
+AVS_SIGNING_KEY_PATH="$(pwd)/secrets/avs-signing-key.pem" \
+AVS_ALLOW_DEBUG_ENCLAVE=1 \
+AVS_ALLOW_OUTDATED_TCB=1 \
+RUST_LOG=info \
+./target/release/attestation-verification-service
+```
+
+**Terminal 2 - Enclave:**
+```bash
+# Build (one-time, or after code changes)
+CC=clang CXX=clang++ make SGX=1 RA_TYPE=dcap SGX_DEBUG=1
 
 # Run
 gramine-sgx relational-sdk
 ```
+
+**Terminal 3 - Test:**
+```bash
+# Health checks
+curl -s http://127.0.0.1:9100/health
+curl -sk https://127.0.0.1:8080/health
+
+# Get public key (no auth required)
+curl -sk https://127.0.0.1:8080/v1/attestation/public-key | jq
+
+# Test attestation (requires Clerk token via dashboard, or skip auth for testing)
+# Note: Direct curl to /v1/attest requires a Clerk JWT
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AVS_JWKS_URL` | `http://127.0.0.1:9100/.well-known/jwks.json` | AVS JWKS endpoint for token validation |
+| `RUST_LOG` | `info` | Log level (trace, debug, info, warn, error) |
+
+### Debug vs Production Mode
+
+The `SGX_DEBUG` flag controls whether the enclave runs in debug mode:
+
+| Mode | Command | Security |
+|------|---------|----------|
+| **Debug** | `make SGX=1 RA_TYPE=dcap SGX_DEBUG=1` | ⚠️ Allows GDB attach, memory inspection |
+| **Production** | `make SGX=1 RA_TYPE=dcap SGX_DEBUG=0` | ✅ Secure, no debug access |
+
+**Always use `SGX_DEBUG=0` for staging/production deployments.**
 
 ### Docker (requires SGX hardware)
 
