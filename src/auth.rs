@@ -164,7 +164,8 @@ pub async fn fetch_jwks(url: &str) -> Result<Vec<(String, DecodingKey)>, String>
 pub async fn get_decoding_keys(state: &AppState) -> Result<Vec<(String, DecodingKey)>, String> {
     // Check cache validity.
     {
-        let cache = state.jwks_cache.read().unwrap();
+        // Use unwrap_or_else to recover from poisoned lock
+        let cache = state.jwks_cache.read().unwrap_or_else(|e| e.into_inner());
         if let Some(ref c) = *cache {
             if c.fetched_at.elapsed().as_secs() < JWKS_CACHE_TTL_SECS {
                 return Ok(c.keys.clone());
@@ -174,9 +175,17 @@ pub async fn get_decoding_keys(state: &AppState) -> Result<Vec<(String, Decoding
 
     // Fetch and update cache.
     let url = avs_jwks_url();
+    // Warn if using HTTP (insecure in production)
+    if url.starts_with("http://") && !url.contains("localhost") && !url.contains("127.0.0.1") {
+        tracing::warn!(
+            "JWKS URL uses HTTP - this is insecure in production: {}",
+            url
+        );
+    }
     let keys = fetch_jwks(&url).await?;
     {
-        let mut cache = state.jwks_cache.write().unwrap();
+        // Use unwrap_or_else to recover from poisoned lock
+        let mut cache = state.jwks_cache.write().unwrap_or_else(|e| e.into_inner());
         *cache = Some(JwksCache {
             keys: keys.clone(),
             fetched_at: Instant::now(),
@@ -227,15 +236,19 @@ pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenData, 
     validation.set_issuer(&[AVS_ISSUER]);
     validation.validate_exp = true;
 
-    let token_data = decode::<AttestationClaims>(token, decoding_key, &validation)
-        .map_err(|e| {
+    let token_data =
+        decode::<AttestationClaims>(token, decoding_key, &validation).map_err(|e| {
             warn!(error = %e, "Token validation failed");
             format!("token validation failed: {e}")
         })?;
 
     let result = TokenData {
         sub: token_data.claims.sub.clone(),
-        role: token_data.claims.role.clone().unwrap_or_else(|| "user".to_string()),
+        role: token_data
+            .claims
+            .role
+            .clone()
+            .unwrap_or_else(|| "user".to_string()),
     };
 
     info!(

@@ -12,6 +12,7 @@
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 use crate::auth::{AdminToken, ReadOnlyToken, TokenData, UserToken};
 use crate::crypto::{enclave_key, Jwk};
@@ -173,9 +174,10 @@ pub async fn data_upload(
     // 4. Parse and process the decrypted data
     // 5. Store results securely within enclave
     let _ = payload; // Mark as used until decryption is implemented
+    let _ = &token; // Mark token as used
     Json(DataUploadResponse {
         status: "received".to_string(),
-        record_id: format!("rec_{}", token.sub.chars().take(8).collect::<String>()),
+        record_id: Uuid::new_v4().to_string(),
     })
 }
 

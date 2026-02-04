@@ -64,6 +64,7 @@ fs.mounts = [
 
 # SGX configuration - DCAP attestation is mandatory
 sgx.debug = true
+sgx.enclave_size = "512M"
 sgx.remote_attestation = "{{ ra_type }}"
 sgx.isvprodid = {{ isvprodid }}
 sgx.isvsvn = {{ isvsvn }}

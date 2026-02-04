@@ -32,6 +32,7 @@ mod health;
 mod tls;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{get, post},
     Router,
 };
@@ -183,6 +184,7 @@ async fn main() {
     };
 
     // Build the router with all endpoints.
+    // Body limit: 10MB max for file uploads, prevents DoS
     let app = Router::new()
         // Health endpoints (unversioned for k8s probes).
         .route("/health", get(health))
@@ -196,6 +198,7 @@ async fn main() {
         .route("/v1/data/query", get(data_query))
         // OpenAPI documentation.
         .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max request body
         .with_state(state);
 
     // Bind on all interfaces for VM access.

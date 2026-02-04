@@ -26,7 +26,6 @@
 
 use axum::{http::StatusCode, Json};
 use serde::Serialize;
-use std::path::Path;
 use utoipa::ToSchema;
 
 use crate::config::DATA_DIR_ENV;
@@ -57,12 +56,13 @@ pub struct HealthResponse {
 }
 
 /// Check if the data directory exists and is accessible.
-fn check_data_dir() -> Option<String> {
+/// Uses async I/O to avoid blocking the Tokio runtime.
+async fn check_data_dir() -> Option<String> {
     if let Ok(dir) = std::env::var(DATA_DIR_ENV) {
-        if Path::new(&dir).exists() {
-            Some("ok".to_string())
-        } else {
-            Some("missing".to_string())
+        // Use async filesystem check to avoid blocking
+        match tokio::fs::metadata(&dir).await {
+            Ok(_) => Some("ok".to_string()),
+            Err(_) => Some("missing".to_string()),
         }
     } else {
         None // Not configured, don't report.
@@ -84,7 +84,7 @@ fn check_data_dir() -> Option<String> {
     )
 )]
 pub async fn health() -> (StatusCode, Json<ReadyResponse>) {
-    let data_dir = check_data_dir();
+    let data_dir = check_data_dir().await;
     let all_ok = data_dir.as_ref().map(|s| s == "ok").unwrap_or(true);
 
     let response = ReadyResponse {
