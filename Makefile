@@ -2,7 +2,8 @@
 # Copyright (C) 2023 Gramine contributors
 # Copyright (C) 2026 Relational Network
 
-ARCH_LIBDIR ?= /lib/$(shell $(CC) -dumpmachine)
+# Use fixed x86_64-linux-gnu path (clang reports x86_64-pc-linux-gnu which doesn't exist)
+ARCH_LIBDIR ?= /lib/x86_64-linux-gnu
 ENTRYPOINT ?= $(firstword $(wildcard /usr/bin/gramine-ratls /usr/local/bin/gramine-ratls /bin/gramine-ratls))
 
 # Docker mode: set DOCKER=1 to use /app paths instead of local paths
@@ -20,6 +21,11 @@ endif
 RA_TYPE ?= dcap
 ISVPRODID ?= 0
 ISVSVN ?= 0
+
+# SGX_DEBUG: Set to 1 for debug enclaves (NEVER use in production!)
+# - 0 (default): Production mode - secure, no debugging
+# - 1: Debug mode - allows debugging but exposes enclave memory
+SGX_DEBUG ?= 0
 
 ifeq ($(DEBUG),1)
 GRAMINE_LOG_LEVEL = debug
@@ -44,7 +50,7 @@ relational-sdk.manifest: relational-sdk.manifest.template $(SELF_EXE)
 		exit 1; \
 	fi
 	@mkdir -p $(DATA_DIR)
-	gramine-manifest \
+	SGX_DEBUG=$(SGX_DEBUG) gramine-manifest \
 		-Dentrypoint=$(ENTRYPOINT) \
 		-Dlog_level=$(GRAMINE_LOG_LEVEL) \
 		-Darch_libdir=$(ARCH_LIBDIR) \

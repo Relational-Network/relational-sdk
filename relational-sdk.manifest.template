@@ -63,7 +63,10 @@ fs.mounts = [
 ]
 
 # SGX configuration - DCAP attestation is mandatory
-sgx.debug = true
+# sgx.debug: Set via SGX_DEBUG env var (default: false for production security)
+# - true: Allow debugging (NEVER use in production - exposes enclave memory!)
+# - false: Production mode (recommended)
+sgx.debug = {{ 'true' if env.get('SGX_DEBUG', '0') == '1' else 'false' }}
 sgx.enclave_size = "512M"
 sgx.remote_attestation = "{{ ra_type }}"
 sgx.isvprodid = {{ isvprodid }}
