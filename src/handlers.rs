@@ -11,6 +11,7 @@
 
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -39,6 +40,7 @@ use crate::crypto::{enclave_key, Jwk};
     )
 )]
 pub async fn get_public_key() -> Json<Jwk> {
+    debug!("Serving enclave public key");
     let key = enclave_key();
     Json(key.public_jwk().clone())
 }
@@ -71,6 +73,7 @@ pub struct ProtectedResponse {
     )
 )]
 pub async fn protected(token: TokenData) -> Json<ProtectedResponse> {
+    debug!(sub = %token.sub, role = %token.role, "Protected endpoint accessed");
     Json(ProtectedResponse {
         message: "authenticated inside enclave".to_string(),
         user: token.sub,
@@ -107,6 +110,7 @@ pub struct AdminStatusResponse {
     )
 )]
 pub async fn admin_status(AdminToken(token): AdminToken) -> Json<AdminStatusResponse> {
+    info!(admin_user = %token.sub, "Admin status requested");
     Json(AdminStatusResponse {
         status: "operational".to_string(),
         admin_user: token.sub,
@@ -167,17 +171,24 @@ pub async fn data_upload(
     UserToken(token): UserToken,
     Json(payload): Json<DataUploadRequest>,
 ) -> Json<DataUploadResponse> {
+    let record_id = Uuid::new_v4().to_string();
+    info!(
+        sub = %token.sub,
+        role = %token.role,
+        record_id = %record_id,
+        data_size = payload.encrypted_data.len(),
+        has_nonce = payload.nonce.is_some(),
+        "Data upload received"
+    );
     // TODO: Implement encrypted data processing:
     // 1. Base64-decode payload.encrypted_data
     // 2. Decrypt using enclave's P-256 private key (ECIES or ECDH-ES+A256GCM)
     // 3. Validate payload.nonce for replay protection
     // 4. Parse and process the decrypted data
     // 5. Store results securely within enclave
-    let _ = payload; // Mark as used until decryption is implemented
-    let _ = &token; // Mark token as used
     Json(DataUploadResponse {
         status: "received".to_string(),
-        record_id: Uuid::new_v4().to_string(),
+        record_id,
     })
 }
 
@@ -205,6 +216,7 @@ pub struct DataQueryResponse {
     )
 )]
 pub async fn data_query(ReadOnlyToken(token): ReadOnlyToken) -> Json<DataQueryResponse> {
+    info!(sub = %token.sub, role = %token.role, "Data query requested");
     // TODO: Implement secure query execution:
     // 1. Parse query parameters (add query params to endpoint if needed)
     // 2. Execute query against enclave-protected data store
