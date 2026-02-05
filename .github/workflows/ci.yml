@@ -105,3 +105,40 @@ jobs:
         # Note: We use P-256 ECDSA only (no RSA) to avoid vulnerabilities like
         # RUSTSEC-2023-0071. The jsonwebtoken crate is configured with only the
         # "p256" feature to exclude RSA dependencies entirely.
+
+  validate-config:
+    name: Validate Configuration Files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install systemd (for systemd-analyze)
+        run: sudo apt-get update && sudo apt-get install -y systemd
+
+      - name: Validate systemd service file
+        run: |
+          echo "Validating scripts/enclave.service..."
+          # Basic syntax check
+          systemd-analyze verify scripts/enclave.service || echo "Warning: systemd-analyze may report issues due to missing runtime dependencies"
+          
+          # Check for required sections
+          if ! grep -q '\[Unit\]' scripts/enclave.service; then
+            echo "ERROR: Missing [Unit] section"
+            exit 1
+          fi
+          if ! grep -q '\[Service\]' scripts/enclave.service; then
+            echo "ERROR: Missing [Service] section"
+            exit 1
+          fi
+          if ! grep -q '\[Install\]' scripts/enclave.service; then
+            echo "ERROR: Missing [Install] section"
+            exit 1
+          fi
+          
+          echo "✓ Systemd service file validation passed"
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/Dockerfile
+          failure-threshold: warning

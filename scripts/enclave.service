@@ -16,20 +16,25 @@
 
 [Unit]
 Description=Relational SDK SGX Enclave (Docker)
-After=docker.service aesmd.service
+After=docker.service aesmd.service avs.service network-online.target
 Requires=docker.service
-Wants=aesmd.service
+Wants=aesmd.service avs.service network-online.target
 
 [Service]
 Type=simple
 Restart=always
 RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
 TimeoutStartSec=120
 EnvironmentFile=/opt/iob-micres/.env
 
 # Stop and remove any existing container
 ExecStartPre=-/usr/bin/docker stop enclave
 ExecStartPre=-/usr/bin/docker rm enclave
+
+# Wait for AVS to be ready (enclave needs JWKS endpoint)
+ExecStartPre=/bin/bash -c 'for i in {1..60}; do curl -sf http://127.0.0.1:9100/.well-known/jwks.json >/dev/null 2>&1 && exit 0; sleep 1; done; echo "AVS JWKS not ready after 60s, continuing anyway..."'
 
 # Run the enclave container
 # - Uses host networking for localhost AVS communication
@@ -48,6 +53,9 @@ ExecStart=/usr/bin/docker run --rm --name enclave \
     ghcr.io/relational-network/relational-sdk:staging-latest
 
 ExecStop=/usr/bin/docker stop enclave
+
+# Health check - verify enclave is responding (RA-TLS)
+ExecStartPost=/bin/bash -c 'for i in {1..60}; do sleep 2; curl -sfk https://127.0.0.1:8080/health && exit 0; done; echo "Enclave health check failed after 120s" && exit 1'
 
 [Install]
 WantedBy=multi-user.target
