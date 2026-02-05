@@ -12,6 +12,7 @@ ARG UBUNTU_CODENAME=focal
 ################################
 # STAGE 1 - BUILDER
 ################################
+# hadolint ignore=DL3006
 FROM ${UBUNTU_IMAGE} AS builder
 ARG UBUNTU_CODENAME
 
@@ -51,6 +52,8 @@ RUN curl -fsSLo /usr/share/keyrings/intel-sgx-deb.key \
       > /etc/apt/sources.list.d/intel-sgx.list
 
 # Microsoft repo (Azure DCAP)
+# Set shell for pipefail support in pipes  
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor \
       > /usr/share/keyrings/microsoft-prod.gpg && \
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] \
@@ -58,6 +61,7 @@ RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor
       > /etc/apt/sources.list.d/microsoft-prod.list
 
 # Gramine (build-time)
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gramine \
     && rm -rf /var/lib/apt/lists/*
@@ -77,12 +81,14 @@ RUN cargo build --release
 ################################
 # STAGE 2 - RUNTIME
 ################################
+# hadolint ignore=DL3006
 FROM ${UBUNTU_IMAGE} AS runtime
 ARG UBUNTU_CODENAME
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Minimal bootstrap tools
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gnupg2 \
@@ -104,6 +110,7 @@ RUN curl -fsSLo /usr/share/keyrings/intel-sgx-deb.key \
       > /etc/apt/sources.list.d/intel-sgx.list
 
 # Microsoft repo (Azure DCAP)
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor \
       > /usr/share/keyrings/microsoft-prod.gpg && \
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] \
@@ -111,6 +118,7 @@ RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor
       > /etc/apt/sources.list.d/microsoft-prod.list
 
 # Runtime dependencies
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gramine \
     gramine-ratls-dcap \
@@ -146,6 +154,8 @@ ARG DATA_DIR=/app/data
 
 # Generate Gramine manifest using same logic as Makefile (DOCKER=1 mode)
 # This ensures consistency between Docker and native builds
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# hadolint ignore=SC2086,DL3059
 RUN ENTRYPOINT=$(which gramine-ratls) && \
     SGX_DEBUG=${SGX_DEBUG} gramine-manifest \
     -Dentrypoint=${ENTRYPOINT} \
