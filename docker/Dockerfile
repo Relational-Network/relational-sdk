@@ -21,6 +21,7 @@ ENV CC=clang
 ENV CXX=clang++
 
 # Build-time dependencies
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gnupg2 \
@@ -76,6 +77,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo fetch
+# hadolint ignore=DL3059
 RUN cargo build --release
 
 ################################
