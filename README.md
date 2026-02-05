@@ -127,9 +127,31 @@ docker run --rm -d \
   --device /dev/sgx/provision \
   -v "$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
   -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
-  -e AVS_JWKS_URL=https://127.0.0.1:9100/.well-known/jwks.json \
+  -e AVS_JWKS_URL=http://127.0.0.1:9100/.well-known/jwks.json \
   relationalnetwork/relational-sdk:focal
 ```
+
+### Local Dev (Docker: AVS + relational-sdk)
+
+```bash
+# 1. Start AVS (see ../attestation-verification-service/README.md)
+#    AVS must be on host network so 127.0.0.1:9100 is reachable.
+
+# 2. Start relational-sdk (host network)
+docker run --rm -d --name relational-sdk-sgx --network host \
+  --device /dev/sgx/enclave --device /dev/sgx/provision \
+  -v "$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
+  -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
+  -e AVS_JWKS_URL=http://127.0.0.1:9100/.well-known/jwks.json \
+  relationalnetwork/relational-sdk:focal
+
+# 3. Verify AVS reachability from inside the SDK container
+docker exec relational-sdk-sgx curl -s http://127.0.0.1:9100/.well-known/jwks.json | jq
+```
+
+Notes:
+- If AVS is behind Caddy (HTTPS), set `AVS_JWKS_URL` to `https://127.0.0.1:9100/.well-known/jwks.json`.
+- `--network host` is required for the SDK to reach AVS on `127.0.0.1`.
 
 Manual Docker run with port mapping:
 
@@ -145,15 +167,15 @@ docker run --rm -it \
   relationalnetwork/relational-sdk:focal
 ```
 
-### Quick E2E Test (with HTTPS AVS)
+### Quick E2E Test (Docker, host network)
 
 ```bash
-# 1. Build and run enclave container (with HTTPS AVS JWKS URL)
+# 1. Run enclave container (AVS should already be running)
 docker run --rm -d --name enclave --network host \
   --device /dev/sgx/enclave --device /dev/sgx/provision \
   -v "$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
   -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
-  -e AVS_JWKS_URL=https://127.0.0.1:9100/.well-known/jwks.json \
+  -e AVS_JWKS_URL=http://127.0.0.1:9100/.well-known/jwks.json \
   relationalnetwork/relational-sdk:focal
 
 # 2. Test health
