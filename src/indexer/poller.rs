@@ -29,7 +29,7 @@ use crate::storage::tx_database::TxDatabase;
 pub fn spawn_indexer(
     solana: Arc<SolanaClient>,
     tx_db: Arc<TxDatabase>,
-    tx_cache: Option<Arc<TxCache>>,
+    tx_cache: Arc<TxCache>,
     poll_interval: Duration,
 ) {
     tokio::spawn(async move {
@@ -48,20 +48,11 @@ pub fn spawn_indexer(
     });
 }
 
-/// Trigger a one-shot sync across all registered addresses.
-pub async fn sync_all_once(
-    solana: &SolanaClient,
-    tx_db: &TxDatabase,
-    tx_cache: &Option<Arc<TxCache>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    poll_once(solana, tx_db, tx_cache).await
-}
-
 /// Trigger a one-shot sync for a single address.
 pub async fn sync_address_once(
     solana: &SolanaClient,
     tx_db: &TxDatabase,
-    tx_cache: &Option<Arc<TxCache>>,
+    tx_cache: &Arc<TxCache>,
     address: &str,
     wallet_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -72,7 +63,7 @@ pub async fn sync_address_once(
 async fn poll_once(
     solana: &SolanaClient,
     tx_db: &TxDatabase,
-    tx_cache: &Option<Arc<TxCache>>,
+    tx_cache: &Arc<TxCache>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addresses = tx_db.get_all_addresses()?;
     debug!(address_count = addresses.len(), "Indexer polling addresses");
@@ -90,7 +81,7 @@ async fn poll_once(
 async fn poll_address(
     solana: &SolanaClient,
     tx_db: &TxDatabase,
-    tx_cache: &Option<Arc<TxCache>>,
+    tx_cache: &Arc<TxCache>,
     address: &str,
     wallet_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -199,9 +190,7 @@ async fn poll_address(
     }
 
     // Invalidate tx cache for this address so queries see fresh data.
-    if let Some(cache) = tx_cache {
-        cache.invalidate(address);
-    }
+    tx_cache.invalidate(address);
 
     Ok(())
 }

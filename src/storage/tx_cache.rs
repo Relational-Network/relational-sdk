@@ -37,6 +37,7 @@ impl TxCache {
     }
 
     /// Get the cached first page for a wallet address.
+    #[allow(dead_code)]
     pub fn get_first_page(
         &self,
         wallet_address: &str,
@@ -51,6 +52,7 @@ impl TxCache {
     }
 
     /// Cache the first page for a wallet address.
+    #[allow(dead_code)]
     pub fn put_first_page(
         &self,
         wallet_address: &str,

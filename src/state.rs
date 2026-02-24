@@ -25,8 +25,8 @@ pub struct AppState {
     pub storage: Arc<EncryptedStorage>,
     /// Solana RPC client.
     pub solana_client: Arc<SolanaClient>,
-    /// Embedded transaction database (redb). `None` if init failed.
-    pub tx_db: Option<Arc<TxDatabase>>,
+    /// Embedded transaction database (redb). Required — enclave panics if init fails.
+    pub tx_db: Arc<TxDatabase>,
     /// LRU cache for first-page tx queries.
-    pub tx_cache: Option<Arc<TxCache>>,
+    pub tx_cache: Arc<TxCache>,
 }

@@ -77,12 +77,14 @@ impl AuditEvent {
     }
 
     /// Mark as a failed action (e.g., permission denied).
+    #[allow(dead_code)]
     pub fn failed(mut self) -> Self {
         self.success = false;
         self
     }
 
     /// Attach arbitrary detail JSON.
+    #[allow(dead_code)]
     pub fn with_details(mut self, details: serde_json::Value) -> Self {
         self.details = Some(details);
         self

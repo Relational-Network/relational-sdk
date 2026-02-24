@@ -48,27 +48,3 @@ pub struct StoredTransaction {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
-
-/// Direction hint stored in the wallet→tx index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TxDirection {
-    Sent,
-    Received,
-}
-
-impl TxDirection {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Sent => "sent",
-            Self::Received => "received",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "sent" => Some(Self::Sent),
-            "received" => Some(Self::Received),
-            _ => None,
-        }
-    }
-}

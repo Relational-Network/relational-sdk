@@ -9,6 +9,7 @@
 
 pub mod admin;
 pub mod balance;
+pub mod pools;
 pub mod transactions;
 pub mod users;
 pub mod wallets;
@@ -65,4 +66,32 @@ pub fn wallet_router() -> Router<AppState> {
             "/v1/admin/wallets/{wallet_id}/activate",
             post(admin::activate_wallet),
         )
+}
+
+/// Build the DRT pool routes (nested under `/v1/drt`).
+pub fn drt_router() -> Router<AppState> {
+    Router::new()
+        // ── Pool CRUD ───────────────────────────────────────────
+        .route("/v1/drt/pools", post(pools::create_pool))
+        .route("/v1/drt/pools/{pool_pda}", get(pools::get_pool))
+        .route(
+            "/v1/drt/pools/by-owner/{owner_pubkey}/{pool_name}",
+            get(pools::get_pool_by_owner),
+        )
+        // ── Pool operations ─────────────────────────────────────
+        .route("/v1/drt/pools/{pool_pda}/buy", post(pools::buy_drt))
+        .route(
+            "/v1/drt/pools/{pool_pda}/redeem",
+            post(pools::redeem_drt),
+        )
+        .route(
+            "/v1/drt/pools/{pool_pda}/close",
+            post(pools::close_pool),
+        )
+        // ── Balance + events ────────────────────────────────────
+        .route(
+            "/v1/drt/pools/{pool_pda}/balance/{drt_type}",
+            get(pools::get_drt_balance),
+        )
+        .route("/v1/drt/events/{signature}", get(pools::get_tx_events))
 }

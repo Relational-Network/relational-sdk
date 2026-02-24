@@ -115,44 +115,33 @@ pub fn cors_allowed_origins() -> Vec<String> {
 // Background Indexer
 // ============================================================================
 
-/// Whether the background tx indexer should run continuously.
+/// Whether the background tx indexer runs continuously.
 ///
-/// Default is disabled so transaction updates can be pulled on-demand by API
-/// handlers instead of polling every few seconds.
-pub const DEFAULT_INDEXER_ENABLED: bool = false;
+/// Hardcoded to `false` — transaction updates are pulled on-demand by API
+/// handlers.  Flip to `true` and rebuild to enable continuous polling.
+pub const INDEXER_ENABLED: bool = false;
 
-/// Default tx indexer poll interval (seconds) when enabled.
-pub const DEFAULT_INDEXER_POLL_INTERVAL_SECS: u64 = 60;
-
-/// Minimum allowed tx indexer poll interval to avoid busy-looping.
-pub const MIN_INDEXER_POLL_INTERVAL_SECS: u64 = 5;
-
-/// Get whether the background indexer is enabled.
-///
-/// Accepts: `1/0`, `true/false`, `yes/no`, `on/off` (case-insensitive).
-pub fn indexer_enabled() -> bool {
-    match env::var("INDEXER_ENABLED") {
-        Ok(value) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => DEFAULT_INDEXER_ENABLED,
-    }
-}
-
-/// Get tx indexer poll interval from environment or use default.
-///
-/// Values below [`MIN_INDEXER_POLL_INTERVAL_SECS`] are clamped upward.
-pub fn indexer_poll_interval_secs() -> u64 {
-    env::var("INDEXER_POLL_INTERVAL_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(|secs| secs.max(MIN_INDEXER_POLL_INTERVAL_SECS))
-        .unwrap_or(DEFAULT_INDEXER_POLL_INTERVAL_SECS)
-}
+/// Tx indexer poll interval in seconds (when enabled).
+pub const INDEXER_POLL_INTERVAL_SECS: u64 = 60;
 
 /// LRU cache capacity (number of wallet first-pages cached).
 pub const TX_CACHE_CAPACITY: usize = 128;
 
 /// LRU cache entry TTL (seconds).
 pub const TX_CACHE_TTL_SECS: u64 = 30;
+
+// ============================================================================
+// DRT Smart Contract
+// ============================================================================
+
+/// DRT program ID on Solana (devnet + mainnet).
+/// Hardcoded — this program is immutable and deployed at the same address
+/// on all networks.
+pub const DRT_PROGRAM_ID_STR: &str = "kG7AyfxRoNKcYWGH8aDR6tCFpLVcETt2kBVaPnQCrnp";
+
+/// Get the DRT program `Pubkey`.
+pub fn drt_program_id() -> solana_sdk::pubkey::Pubkey {
+    use std::str::FromStr;
+    solana_sdk::pubkey::Pubkey::from_str(DRT_PROGRAM_ID_STR)
+        .expect("invalid DRT_PROGRAM_ID_STR — this is a compile-time bug")
+}

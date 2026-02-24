@@ -114,10 +114,8 @@ pub async fn create_wallet(
     repo.create(&metadata, &keypair_bytes)?;
 
     // Register address→wallet mapping for the tx indexer.
-    if let Some(ref db) = state.tx_db {
-        if let Err(e) = db.register_address(&public_address, &wallet_id) {
-            tracing::warn!(error = %e, "Failed to register address in tx database");
-        }
+    if let Err(e) = state.tx_db.register_address(&public_address, &wallet_id) {
+        tracing::warn!(error = %e, "Failed to register address in tx database");
     }
 
     info!(

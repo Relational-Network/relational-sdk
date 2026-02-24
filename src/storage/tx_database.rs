@@ -211,6 +211,7 @@ impl TxDatabase {
     }
 
     /// Update status, slot, and fee of an existing transaction.
+    #[allow(dead_code)]
     pub fn update_status(
         &self,
         signature: &str,
@@ -260,6 +261,7 @@ impl TxDatabase {
     }
 
     /// Look up which wallet owns an address.
+    #[allow(dead_code)]
     pub fn get_wallet_id_for_address(&self, address: &str) -> TxDbResult<Option<String>> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(ADDRESS_WALLET_MAP)?;

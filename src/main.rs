@@ -133,6 +133,15 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         api::admin::query_audit_logs,
         api::admin::suspend_wallet,
         api::admin::activate_wallet,
+        // DRT Pool API
+        api::pools::create_pool,
+        api::pools::get_pool,
+        api::pools::get_pool_by_owner,
+        api::pools::buy_drt,
+        api::pools::redeem_drt,
+        api::pools::close_pool,
+        api::pools::get_drt_balance,
+        api::pools::get_tx_events,
     ),
     components(schemas(
         HealthResponse,
@@ -172,6 +181,23 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         storage::repository::transactions::TxStatus,
         blockchain::types::TokenBalance,
         blockchain::types::SendResult,
+        // DRT schemas
+        blockchain::drt::types::DrtInitConfigRequest,
+        blockchain::drt::types::CreatePoolRequest,
+        blockchain::drt::types::CreatePoolResponse,
+        blockchain::drt::types::BuyDrtRequest,
+        blockchain::drt::types::BuyDrtResponse,
+        blockchain::drt::types::RedeemDrtRequest,
+        blockchain::drt::types::RedeemDrtResponse,
+        blockchain::drt::types::ClosePoolRequest,
+        blockchain::drt::types::ClosePoolResponse,
+        blockchain::drt::types::DrtConfigResponse,
+        blockchain::drt::types::PoolInfoResponse,
+        blockchain::drt::types::DrtBalanceResponse,
+        blockchain::drt::types::DrtPurchasedEventResponse,
+        blockchain::drt::types::RedeemEventResponse,
+        blockchain::drt::types::TxEventsResponse,
+        blockchain::drt::types::DrtEventResponse,
     )),
     modifiers(&SecurityAddon),
     tags(
@@ -184,6 +210,7 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         (name = "Wallets", description = "Wallet CRUD endpoints"),
         (name = "Balance", description = "Balance query endpoints"),
         (name = "Transactions", description = "Transaction endpoints"),
+        (name = "DRT Pools", description = "Data Rights Token pool endpoints"),
     )
 )]
 struct ApiDoc;
@@ -248,23 +275,18 @@ async fn main() {
     info!(network = %network_config.name, rpc = %network_config.rpc_url, "Solana client initialized");
     let solana_client = blockchain::SolanaClient::new(&network_config.rpc_url.clone(), network_config);
 
-    // Initialize transaction database (redb).
-    let tx_db = match storage::tx_database::TxDatabase::open(&storage::StoragePaths::new(&data_dir).tx_db_path()) {
-        Ok(db) => {
-            info!("Transaction database opened");
-            Some(Arc::new(db))
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to open transaction database — tx history unavailable");
-            None
-        }
-    };
+    // Initialize transaction database (redb). Required — fail fast if it cannot open.
+    let tx_db = Arc::new(
+        storage::tx_database::TxDatabase::open(&storage::StoragePaths::new(&data_dir).tx_db_path())
+            .expect("Failed to open transaction database — cannot start enclave without DB"),
+    );
+    info!("Transaction database opened");
 
     // Initialize transaction cache.
-    let tx_cache = Some(Arc::new(storage::tx_cache::TxCache::new(
+    let tx_cache = Arc::new(storage::tx_cache::TxCache::new(
         config::TX_CACHE_CAPACITY,
         std::time::Duration::from_secs(config::TX_CACHE_TTL_SECS),
-    )));
+    ));
 
     // Create shared application state.
     let state = AppState {
@@ -277,19 +299,15 @@ async fn main() {
     };
 
     // Spawn background transaction indexer only when explicitly enabled.
-    let indexer_enabled = config::indexer_enabled();
-    let indexer_interval_secs = config::indexer_poll_interval_secs();
+    let indexer_enabled = config::INDEXER_ENABLED;
+    let indexer_interval_secs = config::INDEXER_POLL_INTERVAL_SECS;
     if indexer_enabled {
-        if let Some(ref db) = state.tx_db {
-            indexer::poller::spawn_indexer(
-                state.solana_client.clone(),
-                db.clone(),
-                state.tx_cache.clone(),
-                std::time::Duration::from_secs(indexer_interval_secs),
-            );
-        } else {
-            info!("Transaction indexer enabled but tx database unavailable; skipping");
-        }
+        indexer::poller::spawn_indexer(
+            state.solana_client.clone(),
+            state.tx_db.clone(),
+            state.tx_cache.clone(),
+            std::time::Duration::from_secs(indexer_interval_secs),
+        );
     } else {
         info!("Transaction indexer disabled; using on-demand API sync");
     }
@@ -309,6 +327,8 @@ async fn main() {
         .route("/v1/data/query", get(data_query))
         // Wallet service routes.
         .merge(api::wallet_router())
+        // DRT pool routes.
+        .merge(api::drt_router())
         // OpenAPI documentation.
         .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max request body

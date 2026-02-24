@@ -241,7 +241,7 @@ pub async fn send_transaction(
     );
 
     // Store transaction in database.
-    if let Some(ref db) = state.tx_db {
+    {
         let now = Utc::now();
         let stored = StoredTransaction {
             signature: result.signature.clone(),
@@ -265,14 +265,12 @@ pub async fn send_transaction(
             (payload.recipient.clone(), "received"),
         ];
 
-        if let Err(e) = db.upsert_transaction(&stored, &directions) {
+        if let Err(e) = state.tx_db.upsert_transaction(&stored, &directions) {
             tracing::warn!(error = %e, "Failed to save transaction to db");
         }
 
         // Invalidate tx cache for sender wallet.
-        if let Some(ref cache) = state.tx_cache {
-            cache.invalidate(&wallet.public_address);
-        }
+        state.tx_cache.invalidate(&wallet.public_address);
     }
 
     audit_log!(
@@ -321,15 +319,10 @@ pub async fn list_transactions(
 
     let limit = query.limit.unwrap_or(20).min(100);
 
-    let db = state
-        .tx_db
-        .as_ref()
-        .ok_or_else(|| ApiError::service_unavailable("transaction database unavailable"))?;
-
     // Pull fresh tx signatures for this wallet on demand.
     if let Err(e) = indexer::poller::sync_address_once(
         state.solana_client.as_ref(),
-        db.as_ref(),
+        state.tx_db.as_ref(),
         &state.tx_cache,
         &wallet.public_address,
         &wallet_id,
@@ -345,7 +338,7 @@ pub async fn list_transactions(
     }
 
     let (entries, next_cursor) =
-        db.list_by_wallet(&wallet.public_address, query.cursor.as_deref(), limit)
+        state.tx_db.list_by_wallet(&wallet.public_address, query.cursor.as_deref(), limit)
             .map_err(|e| ApiError::internal(format!("tx database error: {e}")))?;
 
     let transactions: Vec<TransactionEntry> = entries
@@ -387,15 +380,10 @@ pub async fn get_transaction_status(
     let wallet = repo.get(&wallet_id)?;
     enforce_owner_active(&wallet, &token.sub)?;
 
-    let db = state
-        .tx_db
-        .as_ref()
-        .ok_or_else(|| ApiError::service_unavailable("transaction database unavailable"))?;
-
     // Refresh this wallet before looking up the requested signature.
     if let Err(e) = indexer::poller::sync_address_once(
         state.solana_client.as_ref(),
-        db.as_ref(),
+        state.tx_db.as_ref(),
         &state.tx_cache,
         &wallet.public_address,
         &wallet_id,
@@ -410,7 +398,7 @@ pub async fn get_transaction_status(
         );
     }
 
-    let tx = db
+    let tx = state.tx_db
         .get_transaction(&signature)
         .map_err(|e| ApiError::internal(format!("tx database error: {e}")))?
         .ok_or_else(|| ApiError::not_found(format!("transaction {signature} not found")))?;

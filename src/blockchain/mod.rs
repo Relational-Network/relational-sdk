@@ -4,6 +4,7 @@
 //! Solana blockchain interaction: RPC client, transaction building, signing.
 
 pub mod client;
+pub mod drt;
 pub mod signing;
 pub mod spl_token;
 pub mod transactions;

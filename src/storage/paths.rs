@@ -20,6 +20,7 @@ impl StoragePaths {
     }
 
     /// Root data directory (`/data`).
+    #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
     }

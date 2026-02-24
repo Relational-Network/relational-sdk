@@ -26,8 +26,10 @@ pub enum StorageError {
     /// Resource already exists (e.g., duplicate wallet ID).
     AlreadyExists(String),
     /// Storage has not been initialized (directories missing).
+    #[allow(dead_code)]
     NotInitialized,
     /// Owner mismatch — caller does not own the resource.
+    #[allow(dead_code)]
     PermissionDenied {
         user_id: String,
         resource: String,
@@ -112,6 +114,7 @@ impl EncryptedStorage {
     }
 
     /// Whether [`initialize`](Self::initialize) has been called.
+    #[allow(dead_code)]
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }
@@ -150,6 +153,7 @@ impl EncryptedStorage {
     // ── Raw I/O ───────────────────────────────────────────────────
 
     /// Read raw bytes from a file.
+    #[allow(dead_code)]
     pub fn read_raw(&self, path: impl AsRef<Path>) -> StorageResult<Vec<u8>> {
         let path = path.as_ref();
         fs::read(path).map_err(|e| {
@@ -162,6 +166,7 @@ impl EncryptedStorage {
     }
 
     /// Write raw bytes atomically.
+    #[allow(dead_code)]
     pub fn write_raw(&self, path: impl AsRef<Path>, data: &[u8]) -> StorageResult<()> {
         self.atomic_write(path.as_ref(), data)
     }
@@ -177,6 +182,7 @@ impl EncryptedStorage {
     }
 
     /// Delete a file.
+    #[allow(dead_code)]
     pub fn delete(&self, path: impl AsRef<Path>) -> StorageResult<()> {
         let path = path.as_ref();
         fs::remove_file(path).map_err(|e| {
@@ -189,6 +195,7 @@ impl EncryptedStorage {
     }
 
     /// Delete a directory and all its contents.
+    #[allow(dead_code)]
     pub fn delete_dir(&self, path: impl AsRef<Path>) -> StorageResult<()> {
         let path = path.as_ref();
         fs::remove_dir_all(path).map_err(|e| {

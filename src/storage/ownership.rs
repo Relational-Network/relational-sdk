@@ -9,12 +9,14 @@
 use super::encrypted_fs::StorageError;
 
 /// Trait for any resource that has an owner.
+#[allow(dead_code)]
 pub trait OwnedResource {
     /// The user ID that owns this resource (matches JWT `sub` claim).
     fn owner_user_id(&self) -> &str;
 }
 
 /// Extension trait that checks ownership against a caller's identity.
+#[allow(dead_code)]
 pub trait OwnershipEnforcer: OwnedResource {
     /// Verify that `user_sub` owns this resource.
     fn verify_ownership(&self, user_sub: &str) -> Result<(), StorageError>;
