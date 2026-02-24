@@ -49,7 +49,6 @@ use tracing_subscriber::EnvFilter;
 use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
 
-use state::AppState;
 use config::{avs_jwks_url, AVS_AUDIENCE, DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH};
 use crypto::enclave_key;
 use handlers::{
@@ -57,6 +56,7 @@ use handlers::{
     DataQueryResponse, DataUploadRequest, DataUploadResponse, ProtectedResponse,
 };
 use health::{health, liveness, readiness, HealthChecks, HealthResponse, ReadyResponse};
+use state::AppState;
 use tls::load_tls_config;
 
 /// Start time captured once for uptime reporting.
@@ -273,7 +273,8 @@ async fn main() {
     // Initialize Solana client.
     let network_config = blockchain::types::network_config_from_env();
     info!(network = %network_config.name, rpc = %network_config.rpc_url, "Solana client initialized");
-    let solana_client = blockchain::SolanaClient::new(&network_config.rpc_url.clone(), network_config);
+    let solana_client =
+        blockchain::SolanaClient::new(&network_config.rpc_url.clone(), network_config);
 
     // Initialize transaction database (redb). Required — fail fast if it cannot open.
     let tx_db = Arc::new(

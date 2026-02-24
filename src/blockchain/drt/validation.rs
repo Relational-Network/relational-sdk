@@ -62,22 +62,21 @@ pub fn validate_expected_hash(hash_hex: &str) -> Result<[u8; 32], ApiError> {
 
     let mut bytes = [0u8; 32];
     for i in 0..32 {
-        bytes[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).map_err(|_| {
-            ApiError::bad_request("expected_hash contains invalid hex characters")
-        })?;
+        bytes[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16)
+            .map_err(|_| ApiError::bad_request("expected_hash contains invalid hex characters"))?;
     }
     Ok(bytes)
 }
 
 /// Validate a single `DrtInitConfigRequest` and convert to on-chain `DrtInitConfig`.
-pub fn validate_drt_init_config(
-    cfg: &DrtInitConfigRequest,
-) -> Result<DrtInitConfig, ApiError> {
+pub fn validate_drt_init_config(cfg: &DrtInitConfigRequest) -> Result<DrtInitConfig, ApiError> {
     validate_drt_type(&cfg.drt_type)?;
 
     // Supply bounds.
     if cfg.supply == 0 {
-        return Err(ApiError::bad_request("DRT supply must be greater than zero"));
+        return Err(ApiError::bad_request(
+            "DRT supply must be greater than zero",
+        ));
     }
     if cfg.supply > MAX_SUPPLY {
         return Err(ApiError::bad_request(format!(

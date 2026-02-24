@@ -38,10 +38,7 @@ impl TxCache {
 
     /// Get the cached first page for a wallet address.
     #[allow(dead_code)]
-    pub fn get_first_page(
-        &self,
-        wallet_address: &str,
-    ) -> Option<Vec<(StoredTransaction, String)>> {
+    pub fn get_first_page(&self, wallet_address: &str) -> Option<Vec<(StoredTransaction, String)>> {
         let mut cache = self.cache.lock().ok()?;
         let entry = cache.get(wallet_address)?;
         if entry.inserted_at.elapsed() > self.ttl {
@@ -53,11 +50,7 @@ impl TxCache {
 
     /// Cache the first page for a wallet address.
     #[allow(dead_code)]
-    pub fn put_first_page(
-        &self,
-        wallet_address: &str,
-        txs: Vec<(StoredTransaction, String)>,
-    ) {
+    pub fn put_first_page(&self, wallet_address: &str, txs: Vec<(StoredTransaction, String)>) {
         if let Ok(mut cache) = self.cache.lock() {
             cache.put(
                 wallet_address.to_string(),

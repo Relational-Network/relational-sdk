@@ -9,8 +9,7 @@ use solana_sdk::signer::Signer;
 
 /// Reconstruct a Solana [`Keypair`] from the 64-byte array stored on disk.
 pub fn keypair_from_bytes(bytes: &[u8]) -> Result<Keypair, ApiError> {
-    Keypair::try_from(bytes)
-        .map_err(|e| ApiError::internal(format!("invalid keypair data: {e}")))
+    Keypair::try_from(bytes).map_err(|e| ApiError::internal(format!("invalid keypair data: {e}")))
 }
 
 /// Generate a new random Ed25519 keypair for Solana.

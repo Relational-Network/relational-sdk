@@ -30,10 +30,7 @@ pub enum StorageError {
     NotInitialized,
     /// Owner mismatch — caller does not own the resource.
     #[allow(dead_code)]
-    PermissionDenied {
-        user_id: String,
-        resource: String,
-    },
+    PermissionDenied { user_id: String, resource: String },
 }
 
 impl std::fmt::Display for StorageError {
@@ -140,11 +137,7 @@ impl EncryptedStorage {
     }
 
     /// Serialize and write a JSON file atomically (write-to-temp + rename).
-    pub fn write_json<T: Serialize>(
-        &self,
-        path: impl AsRef<Path>,
-        value: &T,
-    ) -> StorageResult<()> {
+    pub fn write_json<T: Serialize>(&self, path: impl AsRef<Path>, value: &T) -> StorageResult<()> {
         let path = path.as_ref();
         let data = serde_json::to_vec_pretty(value)?;
         self.atomic_write(path, &data)

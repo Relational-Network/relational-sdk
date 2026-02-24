@@ -102,11 +102,7 @@ impl<'a> WalletRepository<'a> {
     }
 
     /// Create a new wallet (metadata + keypair). Fails if wallet already exists.
-    pub fn create(
-        &self,
-        metadata: &WalletMetadata,
-        keypair_bytes: &[u8],
-    ) -> StorageResult<()> {
+    pub fn create(&self, metadata: &WalletMetadata, keypair_bytes: &[u8]) -> StorageResult<()> {
         let wallet_id = &metadata.wallet_id;
         if self.exists(wallet_id) {
             return Err(StorageError::AlreadyExists(format!(
@@ -176,11 +172,13 @@ impl<'a> WalletRepository<'a> {
     /// Read raw keypair bytes (64 bytes for Ed25519). **Internal use only.**
     pub(crate) fn read_keypair(&self, wallet_id: &str) -> StorageResult<Vec<u8>> {
         let path = self.storage.paths().wallet_keypair(wallet_id);
-        self.storage.read_json::<Vec<u8>>(&path).map_err(|e| match e {
-            StorageError::NotFound(_) => {
-                StorageError::NotFound(format!("keypair for wallet {wallet_id} not found"))
-            }
-            other => other,
-        })
+        self.storage
+            .read_json::<Vec<u8>>(&path)
+            .map_err(|e| match e {
+                StorageError::NotFound(_) => {
+                    StorageError::NotFound(format!("keypair for wallet {wallet_id} not found"))
+                }
+                other => other,
+            })
     }
 }

@@ -14,9 +14,10 @@ use crate::error::ApiError;
 ///
 /// Verifies the 8-byte Anchor discriminator before Borsh deserialization.
 pub async fn fetch_pool(rpc: &RpcClient, pool_pda: &Pubkey) -> Result<Pool, ApiError> {
-    let account = rpc.get_account(pool_pda).await.map_err(|e| {
-        ApiError::not_found(format!("pool account {pool_pda} not found: {e}"))
-    })?;
+    let account = rpc
+        .get_account(pool_pda)
+        .await
+        .map_err(|e| ApiError::not_found(format!("pool account {pool_pda} not found: {e}")))?;
 
     let data = &account.data;
     if data.len() < 8 {
@@ -30,9 +31,8 @@ pub async fn fetch_pool(rpc: &RpcClient, pool_pda: &Pubkey) -> Result<Pool, ApiE
         ));
     }
 
-    Pool::try_from_slice(&data[8..]).map_err(|e| {
-        ApiError::internal(format!("failed to deserialize pool account: {e}"))
-    })
+    Pool::try_from_slice(&data[8..])
+        .map_err(|e| ApiError::internal(format!("failed to deserialize pool account: {e}")))
 }
 
 /// Find a DRT config by type within a deserialized pool.

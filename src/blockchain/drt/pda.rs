@@ -9,9 +9,7 @@
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
-use super::types::{
-    ASSOCIATED_TOKEN_PROGRAM_ID_STR, TOKEN_2022_PROGRAM_ID_STR,
-};
+use super::types::{ASSOCIATED_TOKEN_PROGRAM_ID_STR, TOKEN_2022_PROGRAM_ID_STR};
 use crate::config::drt_program_id;
 
 /// Derive the Pool PDA.
@@ -41,10 +39,7 @@ pub fn derive_mint_pda(pool: &Pubkey, drt_type: &str) -> (Pubkey, u8) {
 /// Seeds: `["extra-account-metas", mint_bytes]`
 pub fn derive_extra_metas_pda(mint: &Pubkey) -> (Pubkey, u8) {
     let program_id = drt_program_id();
-    Pubkey::find_program_address(
-        &[b"extra-account-metas", mint.as_ref()],
-        &program_id,
-    )
+    Pubkey::find_program_address(&[b"extra-account-metas", mint.as_ref()], &program_id)
 }
 
 /// Derive the vault ATA (Associated Token Account) for a pool holding DRT tokens.

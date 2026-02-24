@@ -31,8 +31,7 @@ impl SolanaClient {
 
         let from_ata =
             spl_associated_token_account::get_associated_token_address(&keypair.pubkey(), &mint);
-        let to_ata =
-            spl_associated_token_account::get_associated_token_address(&to_pubkey, &mint);
+        let to_ata = spl_associated_token_account::get_associated_token_address(&to_pubkey, &mint);
 
         let mut instructions = Vec::new();
 
@@ -65,14 +64,12 @@ impl SolanaClient {
             .map_err(|e| ApiError::internal(format!("SPL instruction error: {e}")))?,
         );
 
-        let recent_blockhash = self
-            .rpc
-            .get_latest_blockhash()
-            .await
-            .map_err(|e| ApiError::service_unavailable(format!("blockhash fetch failed: {e}")))?;
+        let recent_blockhash =
+            self.rpc.get_latest_blockhash().await.map_err(|e| {
+                ApiError::service_unavailable(format!("blockhash fetch failed: {e}"))
+            })?;
 
-        let message =
-            solana_message::Message::new(&instructions, Some(&keypair.pubkey()));
+        let message = solana_message::Message::new(&instructions, Some(&keypair.pubkey()));
         let tx = solana_transaction::Transaction::new(&[keypair], message, recent_blockhash);
 
         let signature = self

@@ -30,7 +30,10 @@ pub fn wallet_router() -> Router<AppState> {
         .route("/v1/wallets", get(wallets::list_wallets))
         .route("/v1/wallets", post(wallets::create_wallet))
         .route("/v1/wallets/{wallet_id}", get(wallets::get_wallet))
-        .route("/v1/wallets/{wallet_id}", axum::routing::delete(wallets::delete_wallet))
+        .route(
+            "/v1/wallets/{wallet_id}",
+            axum::routing::delete(wallets::delete_wallet),
+        )
         // ── Balance ─────────────────────────────────────────────
         .route("/v1/wallets/{wallet_id}/balance", get(balance::get_balance))
         .route(
@@ -80,14 +83,8 @@ pub fn drt_router() -> Router<AppState> {
         )
         // ── Pool operations ─────────────────────────────────────
         .route("/v1/drt/pools/{pool_pda}/buy", post(pools::buy_drt))
-        .route(
-            "/v1/drt/pools/{pool_pda}/redeem",
-            post(pools::redeem_drt),
-        )
-        .route(
-            "/v1/drt/pools/{pool_pda}/close",
-            post(pools::close_pool),
-        )
+        .route("/v1/drt/pools/{pool_pda}/redeem", post(pools::redeem_drt))
+        .route("/v1/drt/pools/{pool_pda}/close", post(pools::close_pool))
         // ── Balance + events ────────────────────────────────────
         .route(
             "/v1/drt/pools/{pool_pda}/balance/{drt_type}",

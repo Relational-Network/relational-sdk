@@ -141,7 +141,11 @@ async fn poll_address(
             max_supported_transaction_version: Some(0),
         };
 
-        match solana.rpc().get_transaction_with_config(&signature, tx_config).await {
+        match solana
+            .rpc()
+            .get_transaction_with_config(&signature, tx_config)
+            .await
+        {
             Ok(tx_detail) => {
                 let status = if sig_info.err.is_some() {
                     TxStatus::Failed
@@ -154,9 +158,9 @@ async fn poll_address(
                     signature: sig_str.clone(),
                     wallet_id: wallet_id.to_string(),
                     counterparty_wallet_id: None,
-                    from: address.to_string(),     // simplification — sender
-                    to: String::new(),              // parsed below if available
-                    amount: "0".to_string(),        // parsed below if available
+                    from: address.to_string(), // simplification — sender
+                    to: String::new(),         // parsed below if available
+                    amount: "0".to_string(),   // parsed below if available
                     token: TokenType::Native,
                     network: solana.network().name.to_string(),
                     status,
@@ -171,7 +175,11 @@ async fn poll_address(
                 };
 
                 // Determine direction: if this address is the signer, it's "sent".
-                let direction = if stored.from == address { "sent" } else { "received" };
+                let direction = if stored.from == address {
+                    "sent"
+                } else {
+                    "received"
+                };
                 let directions = vec![(address.to_string(), direction)];
 
                 if let Err(e) = tx_db.upsert_transaction(&stored, &directions) {

@@ -337,9 +337,10 @@ pub async fn list_transactions(
         );
     }
 
-    let (entries, next_cursor) =
-        state.tx_db.list_by_wallet(&wallet.public_address, query.cursor.as_deref(), limit)
-            .map_err(|e| ApiError::internal(format!("tx database error: {e}")))?;
+    let (entries, next_cursor) = state
+        .tx_db
+        .list_by_wallet(&wallet.public_address, query.cursor.as_deref(), limit)
+        .map_err(|e| ApiError::internal(format!("tx database error: {e}")))?;
 
     let transactions: Vec<TransactionEntry> = entries
         .into_iter()
@@ -398,7 +399,8 @@ pub async fn get_transaction_status(
         );
     }
 
-    let tx = state.tx_db
+    let tx = state
+        .tx_db
         .get_transaction(&signature)
         .map_err(|e| ApiError::internal(format!("tx database error: {e}")))?
         .ok_or_else(|| ApiError::not_found(format!("transaction {signature} not found")))?;

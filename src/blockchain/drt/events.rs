@@ -180,24 +180,24 @@ pub fn parse_drt_events(logs: &[String]) -> Vec<DrtEvent> {
         let payload = &bytes[8..];
 
         let event = match disc {
-            DISC_POOL_CREATED => {
-                PoolCreatedEvent::try_from_slice(payload).ok().map(DrtEvent::PoolCreated)
-            }
-            DISC_DRT_INITIALIZED => {
-                DrtInitializedEvent::try_from_slice(payload).ok().map(DrtEvent::DrtInitialized)
-            }
-            DISC_DRT_PURCHASED => {
-                DrtPurchasedEvent::try_from_slice(payload).ok().map(DrtEvent::DrtPurchased)
-            }
-            DISC_DRT_REDEEMED => {
-                DrtRedeemedEvent::try_from_slice(payload).ok().map(DrtEvent::DrtRedeemed)
-            }
-            DISC_APPEND_REDEEMED => {
-                AppendRedeemedEvent::try_from_slice(payload).ok().map(DrtEvent::AppendRedeemed)
-            }
-            DISC_POOL_CLOSED => {
-                PoolClosedEvent::try_from_slice(payload).ok().map(DrtEvent::PoolClosed)
-            }
+            DISC_POOL_CREATED => PoolCreatedEvent::try_from_slice(payload)
+                .ok()
+                .map(DrtEvent::PoolCreated),
+            DISC_DRT_INITIALIZED => DrtInitializedEvent::try_from_slice(payload)
+                .ok()
+                .map(DrtEvent::DrtInitialized),
+            DISC_DRT_PURCHASED => DrtPurchasedEvent::try_from_slice(payload)
+                .ok()
+                .map(DrtEvent::DrtPurchased),
+            DISC_DRT_REDEEMED => DrtRedeemedEvent::try_from_slice(payload)
+                .ok()
+                .map(DrtEvent::DrtRedeemed),
+            DISC_APPEND_REDEEMED => AppendRedeemedEvent::try_from_slice(payload)
+                .ok()
+                .map(DrtEvent::AppendRedeemed),
+            DISC_POOL_CLOSED => PoolClosedEvent::try_from_slice(payload)
+                .ok()
+                .map(DrtEvent::PoolClosed),
             _ => None,
         };
 
@@ -231,9 +231,7 @@ pub async fn parse_events_from_signature(
         .get_transaction_with_config(&signature, config)
         .await
         .map_err(|e| {
-            crate::error::ApiError::service_unavailable(format!(
-                "failed to fetch transaction: {e}"
-            ))
+            crate::error::ApiError::service_unavailable(format!("failed to fetch transaction: {e}"))
         })?;
 
     let logs: Vec<String> = tx

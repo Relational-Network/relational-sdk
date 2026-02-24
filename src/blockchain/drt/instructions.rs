@@ -82,8 +82,8 @@ pub fn build_create_pool_atomic(
 
     // Named accounts.
     let mut accounts = vec![
-        AccountMeta::new(*pool_pda, false),          // pool (writable, not signer)
-        AccountMeta::new(*owner, true),               // owner (writable, signer)
+        AccountMeta::new(*pool_pda, false), // pool (writable, not signer)
+        AccountMeta::new(*owner, true),     // owner (writable, signer)
         AccountMeta::new_readonly(token_2022_program_id(), false), // token_program
         AccountMeta::new_readonly(associated_token_program_id(), false), // associated_token_program
         AccountMeta::new_readonly(system_program_id(), false), // system_program
@@ -95,9 +95,9 @@ pub fn build_create_pool_atomic(
         let vault_ata = derive_vault_ata(pool_pda, &mint_pda);
         let (extra_metas_pda, _) = derive_extra_metas_pda(&mint_pda);
 
-        accounts.push(AccountMeta::new(mint_pda, false));         // writable
-        accounts.push(AccountMeta::new(vault_ata, false));        // writable
-        accounts.push(AccountMeta::new(extra_metas_pda, false));  // writable
+        accounts.push(AccountMeta::new(mint_pda, false)); // writable
+        accounts.push(AccountMeta::new(vault_ata, false)); // writable
+        accounts.push(AccountMeta::new(extra_metas_pda, false)); // writable
     }
 
     let main_ix = Instruction {
@@ -142,15 +142,15 @@ pub fn build_buy_drt(
     let buyer_ata = super::pda::derive_user_ata(buyer, mint);
 
     let mut accounts = vec![
-        AccountMeta::new_readonly(*pool_pda, false),               // pool
-        AccountMeta::new(*mint, false),                            // drt_mint (writable)
-        AccountMeta::new(vault_ata, false),                        // vault_token_account (writable)
-        AccountMeta::new(*buyer, true),                            // buyer (signer, writable)
-        AccountMeta::new(buyer_ata, false),                        // buyer_token_account (writable)
-        AccountMeta::new(*pool_owner, false),                      // pool_owner (writable)
+        AccountMeta::new_readonly(*pool_pda, false), // pool
+        AccountMeta::new(*mint, false),              // drt_mint (writable)
+        AccountMeta::new(vault_ata, false),          // vault_token_account (writable)
+        AccountMeta::new(*buyer, true),              // buyer (signer, writable)
+        AccountMeta::new(buyer_ata, false),          // buyer_token_account (writable)
+        AccountMeta::new(*pool_owner, false),        // pool_owner (writable)
         AccountMeta::new_readonly(token_2022_program_id(), false), // token_program
         AccountMeta::new_readonly(associated_token_program_id(), false), // associated_token_program
-        AccountMeta::new_readonly(system_program_id(), false),    // system_program
+        AccountMeta::new_readonly(system_program_id(), false), // system_program
     ];
 
     // Hook remaining accounts.
@@ -190,10 +190,10 @@ pub fn build_redeem_drt(
     let user_ata = super::pda::derive_user_ata(user, mint);
 
     let accounts = vec![
-        AccountMeta::new_readonly(*pool_pda, false),               // pool
-        AccountMeta::new(*mint, false),                            // drt_mint (writable)
-        AccountMeta::new(*user, true),                             // user (signer, writable)
-        AccountMeta::new(user_ata, false),                         // user_token_account (writable)
+        AccountMeta::new_readonly(*pool_pda, false), // pool
+        AccountMeta::new(*mint, false),              // drt_mint (writable)
+        AccountMeta::new(*user, true),               // user (signer, writable)
+        AccountMeta::new(user_ata, false),           // user_token_account (writable)
         AccountMeta::new_readonly(token_2022_program_id(), false), // token_program
     ];
 
@@ -219,17 +219,17 @@ pub fn build_close_pool(pool_pda: &Pubkey, owner: &Pubkey, drts: &[DrtConfig]) -
     let data = DISC_CLOSE_POOL.to_vec();
 
     let mut accounts = vec![
-        AccountMeta::new(*pool_pda, false),                        // pool (writable)
-        AccountMeta::new(*owner, true),                            // owner (signer, writable)
+        AccountMeta::new(*pool_pda, false), // pool (writable)
+        AccountMeta::new(*owner, true),     // owner (signer, writable)
         AccountMeta::new_readonly(token_2022_program_id(), false), // token_program
-        AccountMeta::new_readonly(system_program_id(), false),    // system_program
+        AccountMeta::new_readonly(system_program_id(), false), // system_program
     ];
 
     for drt in drts {
         let mint = drt.mint;
         let vault = derive_vault_ata(pool_pda, &mint);
 
-        accounts.push(AccountMeta::new(mint, false));  // writable
+        accounts.push(AccountMeta::new(mint, false)); // writable
         accounts.push(AccountMeta::new(vault, false)); // writable
 
         if drt.enable_transfer_hook {

@@ -161,6 +161,7 @@ impl TxDatabase {
     /// List transactions for a wallet address with cursor-based pagination.
     ///
     /// Returns `(entries, next_cursor)` where each entry is `(StoredTransaction, direction)`.
+    #[allow(clippy::type_complexity)]
     pub fn list_by_wallet(
         &self,
         address: &str,
@@ -198,7 +199,7 @@ impl TxDatabase {
 
             let direction = val_guard.value().to_string();
             // Extract signature from key: "address|!timestamp|signature"
-            if let Some(sig) = key_str.rsplitn(2, '|').next() {
+            if let Some(sig) = key_str.rsplit('|').next() {
                 if let Some(bytes) = tx_table.get(sig)? {
                     if let Ok(tx) = serde_json::from_slice::<StoredTransaction>(bytes.value()) {
                         results.push((tx, direction));
@@ -224,12 +225,7 @@ impl TxDatabase {
             let mut table = write_txn.open_table(TRANSACTIONS)?;
 
             // Read the existing record into owned bytes first to release borrow.
-            let existing_bytes = {
-                match table.get(signature)? {
-                    Some(guard) => Some(guard.value().to_vec()),
-                    None => None,
-                }
-            };
+            let existing_bytes = { table.get(signature)?.map(|guard| guard.value().to_vec()) };
 
             if let Some(bytes) = existing_bytes {
                 let mut tx: StoredTransaction = serde_json::from_slice(&bytes)?;

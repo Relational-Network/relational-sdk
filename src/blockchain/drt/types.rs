@@ -19,7 +19,7 @@ use utoipa::ToSchema;
 
 /// Deployed program ID on Solana (devnet and mainnet).
 /// Canonical source: [`crate::config::DRT_PROGRAM_ID_STR`].
-#[allow(unused_imports)]          // re-exported for glob consumers (`use types::*`)
+#[allow(unused_imports)] // re-exported for glob consumers (`use types::*`)
 pub use crate::config::DRT_PROGRAM_ID_STR;
 
 /// Token-2022 program.

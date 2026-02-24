@@ -101,9 +101,18 @@ pub async fn get_wallet_stats(
     let repo = WalletRepository::new(&state.storage);
     let all = repo.list_all_wallets()?;
 
-    let active = all.iter().filter(|w| w.status == WalletStatus::Active).count();
-    let suspended = all.iter().filter(|w| w.status == WalletStatus::Suspended).count();
-    let deleted = all.iter().filter(|w| w.status == WalletStatus::Deleted).count();
+    let active = all
+        .iter()
+        .filter(|w| w.status == WalletStatus::Active)
+        .count();
+    let suspended = all
+        .iter()
+        .filter(|w| w.status == WalletStatus::Suspended)
+        .count();
+    let deleted = all
+        .iter()
+        .filter(|w| w.status == WalletStatus::Deleted)
+        .count();
 
     audit_log!(
         &state.storage,

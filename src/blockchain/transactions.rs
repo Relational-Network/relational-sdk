@@ -29,12 +29,11 @@ impl SolanaClient {
         let to = Pubkey::from_str(recipient)
             .map_err(|_| ApiError::unprocessable(format!("invalid recipient: {recipient}")))?;
 
-        let instruction = system_instruction::transfer(&keypair.pubkey(), &to, lamports).into();
-        let recent_blockhash = self
-            .rpc
-            .get_latest_blockhash()
-            .await
-            .map_err(|e| ApiError::service_unavailable(format!("blockhash fetch failed: {e}")))?;
+        let instruction = system_instruction::transfer(&keypair.pubkey(), &to, lamports);
+        let recent_blockhash =
+            self.rpc.get_latest_blockhash().await.map_err(|e| {
+                ApiError::service_unavailable(format!("blockhash fetch failed: {e}"))
+            })?;
 
         let message = Message::new(&[instruction], Some(&keypair.pubkey()));
         let tx = Transaction::new(&[keypair], message, recent_blockhash);
@@ -61,12 +60,11 @@ impl SolanaClient {
         to: &Pubkey,
         lamports: u64,
     ) -> Result<u64, ApiError> {
-        let instruction = system_instruction::transfer(from, to, lamports).into();
-        let recent_blockhash = self
-            .rpc
-            .get_latest_blockhash()
-            .await
-            .map_err(|e| ApiError::service_unavailable(format!("blockhash fetch failed: {e}")))?;
+        let instruction = system_instruction::transfer(from, to, lamports);
+        let recent_blockhash =
+            self.rpc.get_latest_blockhash().await.map_err(|e| {
+                ApiError::service_unavailable(format!("blockhash fetch failed: {e}"))
+            })?;
 
         let message = Message::new_with_blockhash(&[instruction], Some(from), &recent_blockhash);
         self.rpc

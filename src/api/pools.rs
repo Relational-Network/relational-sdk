@@ -29,9 +29,7 @@ use crate::auth::UserToken;
 use crate::blockchain::drt::{
     accounts::{fetch_pool, find_drt_in_pool},
     events::{parse_events_from_signature, DrtEvent},
-    instructions::{
-        build_buy_drt, build_close_pool, build_create_pool_atomic, build_redeem_drt,
-    },
+    instructions::{build_buy_drt, build_close_pool, build_create_pool_atomic, build_redeem_drt},
     pda::{derive_mint_pda, derive_pool_pda, derive_user_ata, derive_vault_ata},
     types::*,
     validation::validate_create_pool_request,
@@ -83,8 +81,7 @@ async fn sign_send_and_parse(
         .await
         .map_err(|e| ApiError::service_unavailable(format!("blockhash fetch failed: {e}")))?;
 
-    let message =
-        solana_message::Message::new(&instructions, Some(&keypair.pubkey()));
+    let message = solana_message::Message::new(&instructions, Some(&keypair.pubkey()));
     let tx = solana_transaction::Transaction::new(&[keypair], message, recent_blockhash);
 
     let signature = rpc
@@ -242,8 +239,8 @@ pub async fn get_pool_by_owner(
     State(state): State<AppState>,
     Path((owner_str, pool_name)): Path<(String, String)>,
 ) -> Result<Json<PoolInfoResponse>, ApiError> {
-    let owner = Pubkey::from_str(&owner_str)
-        .map_err(|_| ApiError::bad_request("invalid owner address"))?;
+    let owner =
+        Pubkey::from_str(&owner_str).map_err(|_| ApiError::bad_request("invalid owner address"))?;
     let (pool_pda, _) = derive_pool_pda(&owner, &pool_name);
 
     let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;

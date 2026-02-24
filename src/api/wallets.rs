@@ -22,7 +22,9 @@ use crate::blockchain::signing::generate_solana_keypair;
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage::audit::AuditEventType;
-use crate::storage::repository::wallets::{WalletMetadata, WalletRepository, WalletResponse, WalletStatus};
+use crate::storage::repository::wallets::{
+    WalletMetadata, WalletRepository, WalletResponse, WalletStatus,
+};
 
 // ============================================================================
 // Request / Response types
@@ -166,7 +168,8 @@ pub async fn list_wallets(
     let repo = WalletRepository::new(&state.storage);
     let wallets = repo.list_by_owner(&token.sub)?;
     let total = wallets.len();
-    let wallet_responses: Vec<WalletResponse> = wallets.into_iter().map(WalletResponse::from).collect();
+    let wallet_responses: Vec<WalletResponse> =
+        wallets.into_iter().map(WalletResponse::from).collect();
 
     Ok(Json(ListWalletsResponse {
         wallets: wallet_responses,
