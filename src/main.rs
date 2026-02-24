@@ -24,11 +24,17 @@
 //! gramine-sgx relational-sdk
 //! ```
 
+mod api;
 mod auth;
+mod blockchain;
 mod config;
 mod crypto;
+mod error;
 mod handlers;
 mod health;
+mod indexer;
+mod state;
+mod storage;
 mod tls;
 
 use axum::{
@@ -43,7 +49,7 @@ use tracing_subscriber::EnvFilter;
 use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
 
-use auth::AppState;
+use state::AppState;
 use config::{avs_jwks_url, AVS_AUDIENCE, DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH};
 use crypto::enclave_key;
 use handlers::{
@@ -110,6 +116,23 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         handlers::admin_status,
         handlers::data_upload,
         handlers::data_query,
+        // Wallet API
+        api::users::get_me,
+        api::wallets::create_wallet,
+        api::wallets::list_wallets,
+        api::wallets::get_wallet,
+        api::wallets::delete_wallet,
+        api::balance::get_balance,
+        api::balance::get_native_balance,
+        api::transactions::estimate_fee,
+        api::transactions::send_transaction,
+        api::transactions::list_transactions,
+        api::transactions::get_transaction_status,
+        api::admin::get_wallet_stats,
+        api::admin::list_all_wallets,
+        api::admin::query_audit_logs,
+        api::admin::suspend_wallet,
+        api::admin::activate_wallet,
     ),
     components(schemas(
         HealthResponse,
@@ -121,6 +144,34 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         DataUploadResponse,
         DataQueryResponse,
         crypto::Jwk,
+        // Wallet schemas
+        api::users::UserMeResponse,
+        api::wallets::CreateWalletRequest,
+        api::wallets::CreateWalletResponse,
+        api::wallets::ListWalletsResponse,
+        api::wallets::GetWalletResponse,
+        api::wallets::DeleteWalletResponse,
+        api::balance::BalanceResponse,
+        api::balance::NativeBalanceResponse,
+        api::transactions::EstimateFeeRequest,
+        api::transactions::EstimateFeeResponse,
+        api::transactions::SendTransactionRequest,
+        api::transactions::SendTransactionResponse,
+        api::transactions::TransactionEntry,
+        api::transactions::ListTransactionsResponse,
+        api::transactions::TransactionStatusResponse,
+        api::admin::WalletStatsResponse,
+        api::admin::AdminListWalletsResponse,
+        api::admin::AdminWalletEntry,
+        api::admin::AuditEventsResponse,
+        api::admin::WalletStatusChangeResponse,
+        // Shared domain types
+        storage::repository::wallets::WalletResponse,
+        storage::repository::transactions::StoredTransaction,
+        storage::repository::transactions::TokenType,
+        storage::repository::transactions::TxStatus,
+        blockchain::types::TokenBalance,
+        blockchain::types::SendResult,
     )),
     modifiers(&SecurityAddon),
     tags(
@@ -129,6 +180,10 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         (name = "Protected", description = "JWT-protected endpoints"),
         (name = "Admin", description = "Admin-only endpoints"),
         (name = "Data", description = "Data upload and query endpoints"),
+        (name = "Users", description = "User identity endpoints"),
+        (name = "Wallets", description = "Wallet CRUD endpoints"),
+        (name = "Balance", description = "Balance query endpoints"),
+        (name = "Transactions", description = "Transaction endpoints"),
     )
 )]
 struct ApiDoc;
@@ -175,13 +230,69 @@ async fn main() {
     // Initialize enclave keypair.
     let _ = enclave_key();
 
+    // Initialize encrypted storage.
+    let data_dir = config::data_dir();
+    let mut encrypted_storage = storage::EncryptedStorage::new(&data_dir);
+    match encrypted_storage.initialize() {
+        Ok(()) => info!(data_dir = %data_dir, "Encrypted storage initialized"),
+        Err(e) => {
+            tracing::warn!(error = %e, data_dir = %data_dir,
+                "Failed to initialize encrypted storage — wallet endpoints will be unavailable");
+        }
+    }
+
     info!(jwks_url = %avs_jwks_url(), "JWT validation enabled");
+
+    // Initialize Solana client.
+    let network_config = blockchain::types::network_config_from_env();
+    info!(network = %network_config.name, rpc = %network_config.rpc_url, "Solana client initialized");
+    let solana_client = blockchain::SolanaClient::new(&network_config.rpc_url.clone(), network_config);
+
+    // Initialize transaction database (redb).
+    let tx_db = match storage::tx_database::TxDatabase::open(&storage::StoragePaths::new(&data_dir).tx_db_path()) {
+        Ok(db) => {
+            info!("Transaction database opened");
+            Some(Arc::new(db))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to open transaction database — tx history unavailable");
+            None
+        }
+    };
+
+    // Initialize transaction cache.
+    let tx_cache = Some(Arc::new(storage::tx_cache::TxCache::new(
+        config::TX_CACHE_CAPACITY,
+        std::time::Duration::from_secs(config::TX_CACHE_TTL_SECS),
+    )));
 
     // Create shared application state.
     let state = AppState {
         audience: AVS_AUDIENCE.to_string(),
         jwks_cache: Arc::new(RwLock::new(None)),
+        storage: Arc::new(encrypted_storage),
+        solana_client: Arc::new(solana_client),
+        tx_db,
+        tx_cache,
     };
+
+    // Spawn background transaction indexer only when explicitly enabled.
+    let indexer_enabled = config::indexer_enabled();
+    let indexer_interval_secs = config::indexer_poll_interval_secs();
+    if indexer_enabled {
+        if let Some(ref db) = state.tx_db {
+            indexer::poller::spawn_indexer(
+                state.solana_client.clone(),
+                db.clone(),
+                state.tx_cache.clone(),
+                std::time::Duration::from_secs(indexer_interval_secs),
+            );
+        } else {
+            info!("Transaction indexer enabled but tx database unavailable; skipping");
+        }
+    } else {
+        info!("Transaction indexer disabled; using on-demand API sync");
+    }
 
     // Build the router with all endpoints.
     // Body limit: 10MB max for file uploads, prevents DoS
@@ -196,6 +307,8 @@ async fn main() {
         .route("/v1/admin/status", get(admin_status))
         .route("/v1/data/upload", post(data_upload))
         .route("/v1/data/query", get(data_query))
+        // Wallet service routes.
+        .merge(api::wallet_router())
         // OpenAPI documentation.
         .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max request body

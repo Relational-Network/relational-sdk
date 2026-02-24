@@ -32,6 +32,10 @@ loader.env.PORT = "8080"
 
 # AVS URL for JWT validation (passthrough from container env)
 loader.env.AVS_JWKS_URL = { passthrough = true }
+loader.env.SOLANA_RPC_URL = { passthrough = true }
+loader.env.SOLANA_NETWORK = { passthrough = true }
+loader.env.INDEXER_ENABLED = { passthrough = true }
+loader.env.INDEXER_POLL_INTERVAL_SECS = { passthrough = true }
 
 # See https://gramine.readthedocs.io/en/stable/performance.html#glibc-malloc-tuning
 loader.env.MALLOC_ARENA_MAX = "1"
@@ -49,6 +53,15 @@ fs.mounts = [
     # Application directory mount (for self_exe binary)
     # In Docker: app_dir=/app, native: app_dir=. (current directory)
     { path = "{{ app_dir }}", uri = "file:{{ app_dir }}" },
+
+    # ========== DNS RESOLUTION FOR NETWORK ACCESS ==========
+    # Required for connecting to external RPC endpoints (Solana, etc.)
+    { path = "/etc/resolv.conf", uri = "file:/etc/resolv.conf" },
+    { path = "/etc/hosts", uri = "file:/etc/hosts" },
+    { path = "/etc/nsswitch.conf", uri = "file:/etc/nsswitch.conf" },
+    { path = "/etc/ssl/certs", uri = "file:/etc/ssl/certs" },
+    { path = "/usr/share/ca-certificates", uri = "file:/usr/share/ca-certificates" },
+    { path = "/etc/ca-certificates.conf", uri = "file:/etc/ca-certificates.conf" },
 
     # ========== ENCRYPTED PERSISTENT STORAGE ==========
     # All persistent state MUST live under /data
@@ -82,6 +95,18 @@ sgx.trusted_files = [
     "file:{{ gramine.runtimedir() }}/",
     "file:{{ arch_libdir }}/",
     "file:{{ entrypoint }}",
+]
+
+# Files that may change between runs (DNS config, TLS root CAs).
+# These must be "allowed" so the enclave can resolve hostnames and verify
+# TLS certificates when connecting to external services (e.g. Solana RPC).
+sgx.allowed_files = [
+    "file:/etc/resolv.conf",
+    "file:/etc/hosts",
+    "file:/etc/nsswitch.conf",
+    "file:/etc/ssl/certs/",
+    "file:/usr/share/ca-certificates/",
+    "file:/etc/ca-certificates.conf",
 ]
 
 # The maximum number of threads in a single process needs to be declared in advance.

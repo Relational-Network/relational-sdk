@@ -2,14 +2,18 @@
 // Copyright (C) 2026 Relational Network
 
 //! Configuration constants for the relational-sdk enclave service.
+//!
+//! Non-sensitive values are hardcoded here. Only values that **must** differ
+//! between environments use `env::var` with a default fallback.
 
 use std::env;
 
-/// Environment variable for optional data directory readiness check.
-pub const DATA_DIR_ENV: &str = "DATA_DIR";
+// ============================================================================
+// Auth (AVS JWT)
+// ============================================================================
 
 /// Default AVS JWKS URL for token verification.
-/// Override with AVS_JWKS_URL environment variable.
+/// Override with `AVS_JWKS_URL` environment variable.
 pub const DEFAULT_AVS_JWKS_URL: &str = "http://127.0.0.1:9100/.well-known/jwks.json";
 
 /// Get AVS JWKS URL from environment or use default.
@@ -18,12 +22,17 @@ pub fn avs_jwks_url() -> String {
 }
 
 /// Expected audience claim in AVS-issued tokens.
-/// Tokens must have this value in the `aud` claim to be accepted.
 pub const AVS_AUDIENCE: &str = "relational-sdk";
 
 /// Expected issuer claim in AVS-issued tokens.
-/// Tokens must have this value in the `iss` claim to be accepted.
 pub const AVS_ISSUER: &str = "attestation-verification-service";
+
+/// JWKS cache TTL in seconds (5 minutes).
+pub const JWKS_CACHE_TTL_SECS: u64 = 300;
+
+// ============================================================================
+// TLS (RA-TLS)
+// ============================================================================
 
 /// Fixed RA-TLS certificate location written by gramine-ratls (tmpfs).
 pub const DEFAULT_TLS_CERT_PATH: &str = "/tmp/ra-tls.crt.pem";
@@ -31,5 +40,119 @@ pub const DEFAULT_TLS_CERT_PATH: &str = "/tmp/ra-tls.crt.pem";
 /// Fixed RA-TLS key location written by gramine-ratls (tmpfs).
 pub const DEFAULT_TLS_KEY_PATH: &str = "/tmp/ra-tls.key.pem";
 
-/// JWKS cache TTL in seconds (5 minutes).
-pub const JWKS_CACHE_TTL_SECS: u64 = 300;
+// ============================================================================
+// Server
+// ============================================================================
+
+/// Bind address for the HTTPS server.
+#[allow(dead_code)]
+pub const SERVER_HOST: [u8; 4] = [0, 0, 0, 0];
+
+/// Port for the HTTPS server.
+#[allow(dead_code)]
+pub const SERVER_PORT: u16 = 8080;
+
+/// Maximum request body size (10 MiB).
+#[allow(dead_code)]
+pub const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+
+// ============================================================================
+// Storage
+// ============================================================================
+
+/// Default encrypted data directory (Gramine mounts /data as encrypted FS).
+pub const DEFAULT_DATA_DIR: &str = "/data";
+
+/// Environment variable for optional data directory override.
+pub const DATA_DIR_ENV: &str = "DATA_DIR";
+
+/// Get the data directory path from environment or use default.
+pub fn data_dir() -> String {
+    env::var(DATA_DIR_ENV).unwrap_or_else(|_| DEFAULT_DATA_DIR.to_string())
+}
+
+// ============================================================================
+// Solana
+// ============================================================================
+
+/// Default Solana RPC URL — devnet for development, override for mainnet.
+pub const DEFAULT_SOLANA_RPC_URL: &str = "https://api.devnet.solana.com";
+
+/// Default Solana network name.
+pub const DEFAULT_SOLANA_NETWORK: &str = "devnet";
+
+/// Get Solana RPC URL from environment or use default.
+pub fn solana_rpc_url() -> String {
+    env::var("SOLANA_RPC_URL").unwrap_or_else(|_| DEFAULT_SOLANA_RPC_URL.to_string())
+}
+
+/// Get Solana network name from environment or use default.
+pub fn solana_network() -> String {
+    env::var("SOLANA_NETWORK").unwrap_or_else(|_| DEFAULT_SOLANA_NETWORK.to_string())
+}
+
+// ============================================================================
+// CORS
+// ============================================================================
+
+/// Default CORS allowed origins (local dev).
+#[allow(dead_code)]
+pub const DEFAULT_CORS_ORIGINS: &str = "http://localhost:3000";
+
+/// Get CORS allowed origins as a `Vec<String>`.
+/// Set `CORS_ALLOWED_ORIGINS` env var to a comma-separated list for staging/prod.
+#[allow(dead_code)]
+pub fn cors_allowed_origins() -> Vec<String> {
+    env::var("CORS_ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| DEFAULT_CORS_ORIGINS.to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+// ============================================================================
+// Background Indexer
+// ============================================================================
+
+/// Whether the background tx indexer should run continuously.
+///
+/// Default is disabled so transaction updates can be pulled on-demand by API
+/// handlers instead of polling every few seconds.
+pub const DEFAULT_INDEXER_ENABLED: bool = false;
+
+/// Default tx indexer poll interval (seconds) when enabled.
+pub const DEFAULT_INDEXER_POLL_INTERVAL_SECS: u64 = 60;
+
+/// Minimum allowed tx indexer poll interval to avoid busy-looping.
+pub const MIN_INDEXER_POLL_INTERVAL_SECS: u64 = 5;
+
+/// Get whether the background indexer is enabled.
+///
+/// Accepts: `1/0`, `true/false`, `yes/no`, `on/off` (case-insensitive).
+pub fn indexer_enabled() -> bool {
+    match env::var("INDEXER_ENABLED") {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => DEFAULT_INDEXER_ENABLED,
+    }
+}
+
+/// Get tx indexer poll interval from environment or use default.
+///
+/// Values below [`MIN_INDEXER_POLL_INTERVAL_SECS`] are clamped upward.
+pub fn indexer_poll_interval_secs() -> u64 {
+    env::var("INDEXER_POLL_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|secs| secs.max(MIN_INDEXER_POLL_INTERVAL_SECS))
+        .unwrap_or(DEFAULT_INDEXER_POLL_INTERVAL_SECS)
+}
+
+/// LRU cache capacity (number of wallet first-pages cached).
+pub const TX_CACHE_CAPACITY: usize = 128;
+
+/// LRU cache entry TTL (seconds).
+pub const TX_CACHE_TTL_SECS: u64 = 30;

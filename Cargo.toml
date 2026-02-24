@@ -10,23 +10,63 @@ description = "Enclave Microservice using Axum"
 license = "AGPL-3.0-or-later"
 rust-version = "1.92"
 
+[features]
+default = []
+dev = []  # Enables dev-mode logging
+
 [dependencies]
+# ── Web framework ──────────────────────────────────────────────────
 axum = "0.8.8"
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
-serde = { version = "1.0.228", features = ["derive"] }
-utoipa = { version = "5.4.0", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
-base64 = "0.22.1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "request-id", "trace"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# ── Serialization ──────────────────────────────────────────────────
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+
+# ── OpenAPI / Swagger ──────────────────────────────────────────────
+utoipa = { version = "5.4.0", features = ["axum_extras", "chrono"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+
+# ── TLS & Crypto ───────────────────────────────────────────────────
+rustls = { version = "0.23.36", default-features = false, features = ["ring"] }
 # CRITICAL: Only enable p256 for ES256 (ECDSA P-256) - NEVER use rust_crypto or rsa features!
 # The rsa crate has unfixed vulnerability RUSTSEC-2023-0071 (Marvin Attack)
 # aws_lc_rs provides CryptoProvider without the vulnerable rsa crate (uses AWS-LC/BoringSSL)
 jsonwebtoken = { version = "10.3.0", default-features = false, features = ["use_pem", "p256", "aws_lc_rs"] }
 p256 = { version = "0.13.2", features = ["pkcs8"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-serde_json = "1.0.149"
 sha2 = "0.10.9"
-rustls = { version = "0.23.36", default-features = false, features = ["ring"] }
+base64 = "0.22.1"
+
+# ── HTTP client ────────────────────────────────────────────────────
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# ── Observability ──────────────────────────────────────────────────
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ── Utilities ──────────────────────────────────────────────────────
 uuid = { version = "1.16", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+url = "2.5"
+bs58 = "0.5"
+
+# ── Solana ─────────────────────────────────────────────────────────
+solana-sdk = "4.0.1"
+solana-client = "3.1.9"
+solana-transaction-status = "3.1.9"
+spl-token = "9.0.0"
+spl-associated-token-account = "8.0.0"
+# Solana SDK v4 split these into separate crates; versions must match solana-client v3's deps:
+solana-system-interface = "2.0.0"
+solana-transaction = "3.1.0"
+solana-message = "3.1.0"
+solana-commitment-config = "3.1"
+# ── Embedded database ─────────────────────────────────────────────
+redb = "3.1"
+
+# ── In-process cache ──────────────────────────────────────────────
+lru = "0.16"
