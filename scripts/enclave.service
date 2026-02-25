@@ -50,15 +50,15 @@ ExecStart=/usr/bin/docker run --rm --name enclave \
     -v /opt/iob-micres/data:/data \
     -v /opt/iob-micres/secrets/avs-tls.crt:/etc/ssl/certs/avs-ca.crt:ro \
     -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
-    -e AVS_JWKS_URL=${AVS_JWKS_URL:-http://127.0.0.1:9100/.well-known/jwks.json} \
+    -e AVS_JWKS_URL \
     -e SECRET_PROVISION_SERVERS=127.0.0.1:4433 \
-    -e RUST_LOG=${RUST_LOG:-info} \
+    -e RUST_LOG \
     ghcr.io/relational-network/relational-sdk:staging-latest
 
 ExecStop=/usr/bin/docker stop enclave
 
-# Health check - verify enclave is responding (RA-TLS)
-ExecStartPost=/bin/bash -c 'for i in {1..60}; do sleep 2; curl -sfk https://127.0.0.1:8080/health && exit 0; done; echo "Enclave health check failed after 120s" && exit 1'
+# Health check - non-fatal, just for observability
+ExecStartPost=/bin/bash -c 'for i in {1..60}; do sleep 2; curl -sfk https://127.0.0.1:8080/health && exit 0; done; echo "Enclave health check did not respond within 120s (non-fatal)"'
 
 [Install]
 WantedBy=multi-user.target

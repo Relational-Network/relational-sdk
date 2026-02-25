@@ -168,6 +168,10 @@ jobs:
                 fi
             fi
             
+            echo "=== Deploying service file ==="
+            sudo cp /opt/relational-sdk/scripts/enclave.service /etc/systemd/system/enclave.service
+            sudo systemctl daemon-reload
+
             echo "=== Starting enclave service ==="
             sudo systemctl start enclave
             sleep 15
