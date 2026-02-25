@@ -41,14 +41,17 @@ ExecStartPre=/bin/bash -c 'for i in {1..60}; do curl -sf http://127.0.0.1:9100/.
 # - Passes through SGX devices for enclave execution
 # - Mounts signing key (read-only) for runtime signing
 # - Mounts data directory for persistent encrypted storage
+# - Mounts AVS TLS cert as the CA cert for secret provisioning verification
 ExecStart=/usr/bin/docker run --rm --name enclave \
     --network host \
     --device /dev/sgx/enclave \
     --device /dev/sgx/provision \
     -v /opt/iob-micres/secrets/enclave-key.pem:/keys/enclave-key.pem:ro \
     -v /opt/iob-micres/data:/data \
+    -v /opt/iob-micres/secrets/avs-tls.crt:/etc/ssl/certs/avs-ca.crt:ro \
     -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
     -e AVS_JWKS_URL=${AVS_JWKS_URL:-http://127.0.0.1:9100/.well-known/jwks.json} \
+    -e SECRET_PROVISION_SERVERS=127.0.0.1:4433 \
     -e RUST_LOG=${RUST_LOG:-info} \
     ghcr.io/relational-network/relational-sdk:staging-latest
 

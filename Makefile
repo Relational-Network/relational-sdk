@@ -22,6 +22,10 @@ RA_TYPE ?= dcap
 ISVPRODID ?= 0
 ISVSVN ?= 0
 
+# Path to AVS secrets directory (for TLS cert used as CA in secret provisioning).
+# Used by setup-dev-certs and docker-run targets.
+SECRETS_DIR ?= ../attestation-verification-service/secrets
+
 # SGX_DEBUG: Set to 1 for debug enclaves (NEVER use in production!)
 # - 0 (default): Production mode - secure, no debugging
 # - 1: Debug mode - allows debugging but exposes enclave memory
@@ -88,11 +92,13 @@ docker-build:
 docker-run:
 	sudo docker run --rm -it \
 		--name relational-sdk-sgx \
+		--network host \
 		--device /dev/sgx/enclave \
 		--device /dev/sgx/provision \
-		-p 8080:8080 \
 		-v "$$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
+		-v "$(SECRETS_DIR)/avs-tls.crt:/etc/ssl/certs/avs-ca.crt:ro" \
 		-e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
+		-e SECRET_PROVISION_SERVERS=127.0.0.1:4433 \
 		relationalnetwork/relational-sdk:focal
 
 .PHONY: docker-stop
@@ -124,3 +130,20 @@ show-measurements: relational-sdk.sig
 .PHONY: distclean
 distclean: clean
 	$(RM) -rf target/ Cargo.lock
+
+##################### SECRET PROVISIONING ####################################
+
+# Copy the AVS TLS cert to the system CA store so the enclave can verify the
+# secret provisioning TLS connection on port 4433. Run once after first-time
+# setup or when avs-tls.crt is regenerated.
+# Requires: ../attestation-verification-service/secrets/avs-tls.crt
+.PHONY: setup-dev-certs
+setup-dev-certs:
+	@if [ ! -f "$(SECRETS_DIR)/avs-tls.crt" ]; then \
+		echo "ERROR: $(SECRETS_DIR)/avs-tls.crt not found."; \
+		echo "Run: cd ../attestation-verification-service && ./secrets/generate-keys.sh"; \
+		exit 1; \
+	fi
+	sudo cp "$(SECRETS_DIR)/avs-tls.crt" /etc/ssl/certs/avs-ca.crt
+	sudo update-ca-certificates --fresh
+	@echo "Installed AVS CA cert at /etc/ssl/certs/avs-ca.crt"
