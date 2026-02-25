@@ -12,3 +12,8 @@ relational-sdk.manifest.sgx
 attestation-client/attest
 attestation-client/ssl/ca.crt
 attestation-client/ssl/ca.key
+
+# Encrypted data directory (Gramine sealed)
+/data/
+
+SPRINT*

@@ -38,12 +38,12 @@ use axum::{
 };
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
-use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::config::{avs_jwks_url, AVS_ISSUER, JWKS_CACHE_TTL_SECS};
 use crate::crypto::JwksResponse;
+use crate::state::AppState;
 
 /// Claims from AVS-issued attestation tokens.
 ///
@@ -108,13 +108,6 @@ impl TokenData {
 pub struct JwksCache {
     pub keys: Vec<(String, DecodingKey)>,
     pub fetched_at: Instant,
-}
-
-/// Shared application state for JWT validation.
-#[derive(Clone)]
-pub struct AppState {
-    pub audience: String,
-    pub jwks_cache: Arc<RwLock<Option<JwksCache>>>,
 }
 
 /// Fetch JWKS from AVS and parse the decoding keys.
