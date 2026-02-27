@@ -109,8 +109,9 @@ pub struct DrtInitConfig {
 
 /// On-chain Pool account (8-byte discriminator prefix handled externally).
 #[derive(Debug, Clone, BorshDeserialize)]
-#[allow(dead_code)] // All fields required for correct Borsh deserialization layout
+// All fields required for correct Borsh deserialization layout
 pub struct Pool {
+    #[allow(dead_code)]
     pub bump: u8,
     pub name: String,
     pub owner: Pubkey,

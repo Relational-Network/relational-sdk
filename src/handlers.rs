@@ -287,13 +287,11 @@ pub async fn data_upload_file(
 
 /// Request body for data upload.
 ///
-/// **TODO:** Implement decryption using enclave's private key:
 /// 1. Decode `encrypted_data` from base64
 /// 2. Decrypt using ECIES with enclave's P-256 private key
-/// 3. Validate `nonce` for replay protection (store in memory/DB)
+/// 3. Validate `nonce` for replay protection (store in memory/DB **TODO**)
 /// 4. Process decrypted payload and store results
 #[derive(Debug, Deserialize, ToSchema)]
-#[allow(dead_code)] // Fields used after decryption is implemented
 pub struct DataUploadRequest {
     /// Base64-encoded encrypted data.
     pub encrypted_data: String,

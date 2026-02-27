@@ -38,6 +38,7 @@ use crate::blockchain::signing::keypair_from_bytes;
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage::audit::AuditEventType;
+use crate::storage::ownership::OwnershipEnforcer;
 use crate::storage::repository::wallets::{WalletMetadata, WalletRepository, WalletStatus};
 
 // ============================================================================
@@ -51,10 +52,7 @@ fn load_wallet_keypair(
     caller_sub: &str,
 ) -> Result<(WalletMetadata, Keypair), ApiError> {
     let wallet = repo.get(wallet_id)?;
-
-    if wallet.owner_user_id != caller_sub {
-        return Err(ApiError::forbidden("you do not own this wallet"));
-    }
+    wallet.verify_ownership(caller_sub)?;
     if wallet.status == WalletStatus::Deleted {
         return Err(ApiError::not_found(format!("wallet {wallet_id} not found")));
     }

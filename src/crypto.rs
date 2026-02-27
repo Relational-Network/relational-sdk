@@ -49,7 +49,6 @@ pub struct JwksResponse {
 
 /// In-memory keypair bound to the enclave instance lifetime.
 pub struct EnclaveKey {
-    #[allow(dead_code)]
     private_key: SecretKey,
     public_jwk: Jwk,
 }

@@ -52,6 +52,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use config::{
     avs_jwks_url, AVS_AUDIENCE, DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH, MAX_BODY_SIZE,
+    SERVER_HOST, SERVER_PORT,
 };
 use crypto::enclave_key;
 use handlers::{
@@ -347,7 +348,7 @@ async fn main() {
         .with_state(state);
 
     // Bind on all interfaces for VM access.
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 8080));
+    let addr = std::net::SocketAddr::from((SERVER_HOST, SERVER_PORT));
     info!(%addr, "Starting HTTPS server");
 
     // TLS is required for RA-TLS deployments.

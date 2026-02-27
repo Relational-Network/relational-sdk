@@ -26,6 +26,7 @@ use crate::error::ApiError;
 use crate::indexer;
 use crate::state::AppState;
 use crate::storage::audit::AuditEventType;
+use crate::storage::ownership::OwnershipEnforcer;
 use crate::storage::repository::transactions::{StoredTransaction, TokenType, TxStatus};
 use crate::storage::repository::wallets::{WalletRepository, WalletStatus};
 
@@ -423,9 +424,7 @@ fn enforce_owner_active(
     wallet: &crate::storage::repository::wallets::WalletMetadata,
     caller_sub: &str,
 ) -> Result<(), ApiError> {
-    if wallet.owner_user_id != caller_sub {
-        return Err(ApiError::forbidden("you do not own this wallet"));
-    }
+    wallet.verify_ownership(caller_sub)?;
     if wallet.status == WalletStatus::Deleted {
         return Err(ApiError::not_found(format!(
             "wallet {} not found",
