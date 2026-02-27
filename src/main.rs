@@ -29,6 +29,7 @@ mod auth;
 mod blockchain;
 mod config;
 mod crypto;
+mod data_validation;
 mod error;
 mod handlers;
 mod health;
@@ -49,11 +50,14 @@ use tracing_subscriber::EnvFilter;
 use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
 
-use config::{avs_jwks_url, AVS_AUDIENCE, DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH};
+use config::{
+    avs_jwks_url, AVS_AUDIENCE, DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH, MAX_BODY_SIZE,
+};
 use crypto::enclave_key;
 use handlers::{
-    admin_status, data_query, data_upload, get_public_key, protected, AdminStatusResponse,
-    DataQueryResponse, DataUploadRequest, DataUploadResponse, ProtectedResponse,
+    admin_status, data_query, data_upload, data_upload_file, data_validate, get_public_key,
+    protected, AdminStatusResponse, DataFileUploadResponse, DataQueryResponse, DataUploadRequest,
+    DataUploadResponse, DataValidateResponse, ProtectedResponse,
 };
 use health::{health, liveness, readiness, HealthChecks, HealthResponse, ReadyResponse};
 use state::AppState;
@@ -114,7 +118,9 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         handlers::get_public_key,
         handlers::protected,
         handlers::admin_status,
+        handlers::data_validate,
         handlers::data_upload,
+        handlers::data_upload_file,
         handlers::data_query,
         // Wallet API
         api::users::get_me,
@@ -151,7 +157,10 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         AdminStatusResponse,
         DataUploadRequest,
         DataUploadResponse,
+        DataValidateResponse,
+        DataFileUploadResponse,
         DataQueryResponse,
+        data_validation::ValidationError,
         crypto::Jwk,
         // Wallet schemas
         api::users::UserMeResponse,
@@ -314,7 +323,7 @@ async fn main() {
     }
 
     // Build the router with all endpoints.
-    // Body limit: 10MB max for file uploads, prevents DoS
+    // Body limit: 20MB max for upload endpoints, prevents unbounded memory usage.
     let app = Router::new()
         // Health endpoints (unversioned for k8s probes).
         .route("/health", get(health))
@@ -324,7 +333,9 @@ async fn main() {
         .route("/v1/attestation/public-key", get(get_public_key))
         .route("/v1/protected", get(protected))
         .route("/v1/admin/status", get(admin_status))
+        .route("/v1/data/validate", post(data_validate))
         .route("/v1/data/upload", post(data_upload))
+        .route("/v1/data/upload-file", post(data_upload_file))
         .route("/v1/data/query", get(data_query))
         // Wallet service routes.
         .merge(api::wallet_router())
@@ -332,7 +343,7 @@ async fn main() {
         .merge(api::drt_router())
         // OpenAPI documentation.
         .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max request body
+        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state);
 
     // Bind on all interfaces for VM access.

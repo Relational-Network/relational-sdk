@@ -3,10 +3,14 @@
 
 //! JWK types and cryptographic key generation for the enclave.
 
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::Engine;
+use hkdf::Hkdf;
+use p256::ecdh::diffie_hellman;
 use p256::elliptic_curve::rand_core::OsRng;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
-use p256::SecretKey;
+use p256::{PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
@@ -72,6 +76,52 @@ pub fn enclave_key() -> &'static EnclaveKey {
     })
 }
 
+/// Decrypt an ECDH-ES + AES-256-GCM payload using the enclave private key.
+///
+/// The caller must provide base64/base64url encoded:
+/// - `ciphertext_b64`: AES-GCM ciphertext + tag
+/// - `ephemeral_public_key_b64`: ephemeral P-256 public key (SEC1 bytes)
+/// - `nonce_b64`: 12-byte AES-GCM nonce
+pub fn decrypt_ecdh_payload(
+    ciphertext_b64: &str,
+    ephemeral_public_key_b64: &str,
+    nonce_b64: &str,
+) -> Result<Vec<u8>, String> {
+    let enclave = enclave_key();
+
+    let ciphertext = decode_base64_any(ciphertext_b64)
+        .ok_or_else(|| "invalid encrypted_data encoding".to_string())?;
+    let ephemeral_bytes = decode_base64_any(ephemeral_public_key_b64)
+        .ok_or_else(|| "invalid ephemeral_public_key encoding".to_string())?;
+    let nonce_bytes =
+        decode_base64_any(nonce_b64).ok_or_else(|| "invalid nonce encoding".to_string())?;
+
+    if nonce_bytes.len() != 12 {
+        return Err("nonce must be 12 bytes for AES-GCM".to_string());
+    }
+
+    let peer_public = PublicKey::from_sec1_bytes(&ephemeral_bytes)
+        .map_err(|_| "invalid ephemeral public key bytes".to_string())?;
+
+    let shared_secret = diffie_hellman(
+        enclave.private_key.to_nonzero_scalar(),
+        peer_public.as_affine(),
+    );
+
+    let hk = Hkdf::<Sha256>::new(None, shared_secret.raw_secret_bytes().as_slice());
+    let mut key = [0u8; 32];
+    hk.expand(b"relational-sdk:data-upload:v1", &mut key)
+        .map_err(|_| "failed to derive encryption key".to_string())?;
+
+    let cipher =
+        Aes256Gcm::new_from_slice(&key).map_err(|_| "failed to initialize cipher".to_string())?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&nonce_bytes), ciphertext.as_ref())
+        .map_err(|_| "failed to decrypt encrypted_data".to_string())?;
+
+    Ok(plaintext)
+}
+
 /// Convert the enclave public key into a JWK for browser-side encryption.
 ///
 /// The `kid` (key ID) is derived from SHA-256 of the uncompressed point.
@@ -95,4 +145,21 @@ pub fn jwk_for_public_key(public_key: &p256::PublicKey) -> Jwk {
         alg: Some("ECDH-ES".to_string()),
         kid: Some(kid),
     }
+}
+
+fn decode_base64_any(input: &str) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(input)
+        .ok()
+        .or_else(|| {
+            base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(input)
+                .ok()
+        })
+        .or_else(|| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(input)
+                .ok()
+        })
+        .or_else(|| base64::engine::general_purpose::URL_SAFE.decode(input).ok())
 }

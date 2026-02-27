@@ -381,6 +381,8 @@ All API endpoints are versioned with `/v1/` prefix. Health endpoints remain unve
 ### Protected (require JWT)
 - `GET /v1/protected` → any authenticated user
 - `GET /v1/admin/status` → admin role required
+- `POST /v1/data/validate` → validate CSV (multipart) against `schema_id`
+- `POST /v1/data/upload-file` → validate + persist CSV (multipart)
 - `POST /v1/data/upload` → user or admin role required
 - `GET /v1/data/query` → read_only, user, or admin role
 
@@ -440,7 +442,19 @@ curl -sk -X POST https://127.0.0.1:8080/v1/data/upload \
   -H "Content-Type: application/json" \
   -d '{"encrypted_data":"base64..."}'
 
-# 5. Query data (requires read_only, user, or admin role)
+# 5. Validate CSV (multipart pre-check, no persistence)
+curl -sk -X POST https://127.0.0.1:8080/v1/data/validate \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "schema_id=pilot_v1" \
+  -F "file=@./sample.csv"
+
+# 6. Upload CSV (multipart, validated before persistence)
+curl -sk -X POST https://127.0.0.1:8080/v1/data/upload-file \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "schema_id=pilot_v1" \
+  -F "file=@./sample.csv"
+
+# 7. Query data (requires read_only, user, or admin role)
 curl -sk https://127.0.0.1:8080/v1/data/query \
   -H "Authorization: Bearer $TOKEN"
 ```

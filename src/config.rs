@@ -52,9 +52,9 @@ pub const SERVER_HOST: [u8; 4] = [0, 0, 0, 0];
 #[allow(dead_code)]
 pub const SERVER_PORT: u16 = 8080;
 
-/// Maximum request body size (10 MiB).
+/// Maximum request body size (20 MiB).
 #[allow(dead_code)]
-pub const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+pub const MAX_BODY_SIZE: usize = 20 * 1024 * 1024;
 
 // ============================================================================
 // Storage
