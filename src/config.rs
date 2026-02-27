@@ -45,16 +45,13 @@ pub const DEFAULT_TLS_KEY_PATH: &str = "/tmp/ra-tls.key.pem";
 // ============================================================================
 
 /// Bind address for the HTTPS server.
-#[allow(dead_code)]
 pub const SERVER_HOST: [u8; 4] = [0, 0, 0, 0];
 
 /// Port for the HTTPS server.
-#[allow(dead_code)]
 pub const SERVER_PORT: u16 = 8080;
 
-/// Maximum request body size (10 MiB).
-#[allow(dead_code)]
-pub const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+/// Maximum request body size (20 MiB).
+pub const MAX_BODY_SIZE: usize = 20 * 1024 * 1024;
 
 // ============================================================================
 // Storage
@@ -134,7 +131,7 @@ pub const TX_CACHE_TTL_SECS: u64 = 30;
 // DRT Smart Contract
 // ============================================================================
 
-/// DRT program ID on Solana (devnet + mainnet).
+/// DRT program ID on Solana (devnet).
 /// Hardcoded — this program is immutable and deployed at the same address
 /// on all networks.
 pub const DRT_PROGRAM_ID_STR: &str = "kG7AyfxRoNKcYWGH8aDR6tCFpLVcETt2kBVaPnQCrnp";

@@ -29,7 +29,6 @@ pub enum StorageError {
     #[allow(dead_code)]
     NotInitialized,
     /// Owner mismatch — caller does not own the resource.
-    #[allow(dead_code)]
     PermissionDenied { user_id: String, resource: String },
 }
 
@@ -69,7 +68,10 @@ impl From<StorageError> for crate::error::ApiError {
             StorageError::NotFound(msg) => Self::not_found(msg.clone()),
             StorageError::AlreadyExists(msg) => Self::conflict(msg.clone()),
             StorageError::NotInitialized => Self::service_unavailable("storage not initialized"),
-            StorageError::PermissionDenied { .. } => Self::forbidden(e.to_string()),
+            StorageError::PermissionDenied { .. } => {
+                tracing::warn!("{e}");
+                Self::forbidden("you do not own this resource")
+            }
             StorageError::Io(_) | StorageError::Json(_) => {
                 error!(error = %e, "Storage error");
                 Self::internal("internal storage error")
@@ -159,7 +161,6 @@ impl EncryptedStorage {
     }
 
     /// Write raw bytes atomically.
-    #[allow(dead_code)]
     pub fn write_raw(&self, path: impl AsRef<Path>, data: &[u8]) -> StorageResult<()> {
         self.atomic_write(path.as_ref(), data)
     }
@@ -174,31 +175,31 @@ impl EncryptedStorage {
         fs::File::open(path.as_ref()).is_ok()
     }
 
-    /// Delete a file.
-    #[allow(dead_code)]
-    pub fn delete(&self, path: impl AsRef<Path>) -> StorageResult<()> {
-        let path = path.as_ref();
-        fs::remove_file(path).map_err(|e| {
-            if e.kind() == io::ErrorKind::NotFound {
-                StorageError::NotFound(path.display().to_string())
-            } else {
-                StorageError::Io(e)
-            }
-        })
-    }
+    // /// Delete a file.
+    // #[allow(dead_code)]
+    // pub fn delete(&self, path: impl AsRef<Path>) -> StorageResult<()> {
+    //     let path = path.as_ref();
+    //     fs::remove_file(path).map_err(|e| {
+    //         if e.kind() == io::ErrorKind::NotFound {
+    //             StorageError::NotFound(path.display().to_string())
+    //         } else {
+    //             StorageError::Io(e)
+    //         }
+    //     })
+    // }
 
-    /// Delete a directory and all its contents.
-    #[allow(dead_code)]
-    pub fn delete_dir(&self, path: impl AsRef<Path>) -> StorageResult<()> {
-        let path = path.as_ref();
-        fs::remove_dir_all(path).map_err(|e| {
-            if e.kind() == io::ErrorKind::NotFound {
-                StorageError::NotFound(path.display().to_string())
-            } else {
-                StorageError::Io(e)
-            }
-        })
-    }
+    // /// Delete a directory and all its contents.
+    // #[allow(dead_code)]
+    // pub fn delete_dir(&self, path: impl AsRef<Path>) -> StorageResult<()> {
+    //     let path = path.as_ref();
+    //     fs::remove_dir_all(path).map_err(|e| {
+    //         if e.kind() == io::ErrorKind::NotFound {
+    //             StorageError::NotFound(path.display().to_string())
+    //         } else {
+    //             StorageError::Io(e)
+    //         }
+    //     })
+    // }
 
     /// Create a directory (+ parents).
     pub fn create_dir(&self, path: impl AsRef<Path>) -> StorageResult<()> {

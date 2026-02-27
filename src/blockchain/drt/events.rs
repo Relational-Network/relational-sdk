@@ -32,7 +32,7 @@ pub struct PoolCreatedEvent {
 }
 
 #[derive(Debug, Clone, BorshDeserialize)]
-#[allow(dead_code)] // All fields required for correct Borsh deserialization layout
+// All fields required for correct Borsh deserialization layout
 pub struct DrtInitializedEvent {
     pub pool: Pubkey,
     pub owner: Pubkey,
@@ -40,9 +40,13 @@ pub struct DrtInitializedEvent {
     pub mint: Pubkey,
     pub supply: u64,
     pub cost: u64,
+    #[allow(dead_code)]
     pub fixed_supply: bool,
+    #[allow(dead_code)]
     pub enable_transfer_hook: bool,
+    #[allow(dead_code)]
     pub transfer_fee_basis_points: u16,
+    #[allow(dead_code)]
     pub max_transfer_fee: u64,
     pub timestamp: i64,
 }

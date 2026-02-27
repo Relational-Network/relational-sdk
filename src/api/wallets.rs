@@ -201,11 +201,8 @@ pub async fn get_wallet(
     Path(wallet_id): Path<String>,
 ) -> Result<Json<GetWalletResponse>, ApiError> {
     let repo = WalletRepository::new(&state.storage);
-    let metadata = repo.get(&wallet_id)?;
+    let metadata = repo.get_owned(&wallet_id, &token.sub)?;
 
-    if metadata.owner_user_id != token.sub {
-        return Err(ApiError::forbidden("you do not own this wallet"));
-    }
     if metadata.status == WalletStatus::Deleted {
         return Err(ApiError::not_found(format!("wallet {wallet_id} not found")));
     }
@@ -239,11 +236,7 @@ pub async fn delete_wallet(
     Path(wallet_id): Path<String>,
 ) -> Result<Json<DeleteWalletResponse>, ApiError> {
     let repo = WalletRepository::new(&state.storage);
-    let metadata = repo.get(&wallet_id)?;
-
-    if metadata.owner_user_id != token.sub {
-        return Err(ApiError::forbidden("you do not own this wallet"));
-    }
+    repo.get_owned(&wallet_id, &token.sub)?;
 
     repo.soft_delete(&wallet_id)?;
 

@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::storage::encrypted_fs::{EncryptedStorage, StorageError, StorageResult};
-use crate::storage::ownership::OwnedResource;
+use crate::storage::ownership::{OwnedResource, OwnershipEnforcer};
 
 // ============================================================================
 // Domain types
@@ -99,6 +99,13 @@ impl<'a> WalletRepository<'a> {
             }
             other => other,
         })
+    }
+
+    /// Load wallet metadata and verify the caller owns it.
+    pub fn get_owned(&self, wallet_id: &str, user_sub: &str) -> StorageResult<WalletMetadata> {
+        let meta = self.get(wallet_id)?;
+        meta.verify_ownership(user_sub)?;
+        Ok(meta)
     }
 
     /// Create a new wallet (metadata + keypair). Fails if wallet already exists.
