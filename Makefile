@@ -102,7 +102,7 @@ docker-run:
 		--network host \
 		--device /dev/sgx/enclave \
 		--device /dev/sgx/provision \
-		-v "$(SECRETS_DIR)/avs-tls.crt:/etc/ssl/certs/avs-ca.crt:ro" \
+		-v "$(abspath $(SECRETS_DIR)/avs-tls.crt):/etc/ssl/certs/avs-ca.crt:ro" \
 		-e SECRET_PROVISION_SERVERS=127.0.0.1:4433 \
 		relationalnetwork/relational-sdk:focal
 

@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# check=skip=FromPlatformFlagConstDisallowed
+
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Relational Network
 
@@ -61,7 +63,7 @@ ARG AZ_DCAP_VERSION=1.12.3
 ################################
 # STAGE 1 - BUILDER
 ################################
-# hadolint ignore=DL3006
+# hadolint ignore=DL3006,DL3029
 FROM --platform=linux/amd64 ubuntu:20.04@sha256:c664f8f86ed5a386b0a340d981b8f81714e21a8b9c73f658c4bea56aa179d54a AS builder
 ARG UBUNTU_CODENAME
 ARG RUST_VERSION
@@ -152,7 +154,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 ################################
 # STAGE 2 - RUNTIME
 ################################
-# hadolint ignore=DL3006
+# hadolint ignore=DL3006,DL3029
 FROM --platform=linux/amd64 ubuntu:20.04@sha256:c664f8f86ed5a386b0a340d981b8f81714e21a8b9c73f658c4bea56aa179d54a AS runtime
 ARG UBUNTU_CODENAME
 ARG GRAMINE_VERSION
