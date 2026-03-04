@@ -1,22 +1,71 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Relational Network
+
 # Docker ignore for relational-sdk build context
-target/
+#
+# RULE: only files that exist in the GitHub repo AND are required by the
+# Dockerfile COPY instructions may enter the build context.  Everything else
+# is excluded here so that builds are reproducible from a clean checkout.
+#
+# Dockerfile COPYs exactly:
+#   rust-toolchain.toml  Cargo.toml  Cargo.lock  src/
+#   relational-sdk.manifest.template
+#   docker/restart_aesm.sh  docker/start.sh
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Version-control internals ─────────────────────────────────────────────────
 .git/
 .github/
 .gitignore
-*.md
-!README.md
-.env
-.env.*
-*.pem
-*.key
 
-# SGX artifacts (regenerated in container)
+# ── Build artefacts ───────────────────────────────────────────────────────────
+target/
+
+# ── SGX artefacts (regenerated deterministically inside the container) ────────
 *.sig
 *.manifest
 *.manifest.sgx
 
-# Attestation client (not needed in container)
+# ── Secrets / credentials (belt-and-suspenders; should never reach context) ──
+*.pem
+*.key
+.env
+.env.*
+secrets/
+
+# ── Local-only / .gitignore'd directories ─────────────────────────────────────
+SPRINT/
+
+# Local test data directory
+data/
+
+# Attestation test client (C binary + build artefacts, not needed in image)
 attestation-client/
 
-# Local data directory
-data/
+# ── Files present in GitHub but NOT used by the Dockerfile ───────────────────
+# Keeping these out ensures docker build --no-cache produces identical output
+# regardless of local edits.
+
+# Deployment / infra scripts (enclave.service, deploy-staging.sh)
+scripts/
+
+# On-chain IDL reference only — drt_contract.json is not include_str!'d
+idl/
+
+# Host-side build orchestration (docker build is run by docker/build.sh, not make)
+Makefile
+
+# Build-helper script (not needed inside the running container)
+docker/build.sh
+
+# SPDX text is not required at runtime
+LICENSE
+
+# ── Documentation (markdown) ─────────────────────────────────────────────────
+*.md
+!README.md
+
+# ── Local measurements snapshot ───────────────────────────────────────────────
+# measurements.txt contains MRENCLAVE/MRSIGNER from a previous build on the
+# local machine.  It must NOT enter the context
+measurements.txt
