@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Relational Network
 
-# ⚠️ LIMITED CI - NO SGX HARDWARE
-# 
-# GitHub Actions runners don't have SGX hardware, so this workflow can only:
-# - Check code formatting (cargo fmt)
-# - Run clippy lints
-# - Run unit tests (no SGX-dependent tests)
-# - Build release binary (unsigned, cannot run in SGX)
+# CI
 #
-# For full testing including RA-TLS attestation, you must test on an SGX VM:
-#   make SGX=1 RA_TYPE=dcap
+# ⚠️ NO SGX HARDWARE — GitHub Actions runners cannot run the enclave.
+# This workflow handles:
+#   - Lint (cargo fmt, clippy) and unit tests
+#   - Security audit (cargo audit)
+#   - Dockerfile lint (hadolint)
+#   - Docker image build + sign (build-time signing via --mount=type=secret)
+#     - On push to staging/main: pushed to GHCR, measurements printed to job summary
+#     - On pull_request: built locally for verification only (not pushed)
+#
+# For full SGX testing including RA-TLS attestation, run on an SGX VM:
+#   make RA_TYPE=dcap
 #   make test-attest
 
 name: CI
@@ -26,9 +29,45 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # ── Path filter ────────────────────────────────────────────────────────────
+  # Skip expensive jobs when only docs/CI config changed.
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      docker: ${{ steps.filter.outputs.docker }}
+      config: ${{ steps.filter.outputs.config }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'src/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+            docker:
+              - 'docker/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'src/**'
+              - '*.manifest.template'
+              - 'measurements.txt'
+            config:
+              - 'scripts/**'
+              - 'docker/Dockerfile'
+
   check:
     name: Lint and Test
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -57,40 +96,11 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
-  build-binary:
-    name: Build Release Binary
-    runs-on: ubuntu-latest
-    needs: check
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-
-
-      - name: Build release binary
-        run: cargo build --release
-
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: relational-sdk-binary
-          path: target/release/relational-sdk
-          retention-days: 7
-
   security:
     name: Security Audit
     runs-on: ubuntu-latest
+    needs: [changes, check]
+    if: needs.changes.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -98,7 +108,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo install cargo-audit@0.22.1 --locked
 
       - name: Run audit
         run: cargo audit
@@ -109,6 +119,8 @@ jobs:
   validate-config:
     name: Validate Configuration Files
     runs-on: ubuntu-latest
+    needs: [changes, check]
+    if: needs.changes.outputs.config == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -142,3 +154,112 @@ jobs:
         with:
           dockerfile: docker/Dockerfile
           failure-threshold: warning
+
+  build-docker:
+    name: Build & Sign Docker Image
+    runs-on: ubuntu-latest
+    needs: [changes, check]
+    if: always() && (needs.check.result == 'success' || needs.check.result == 'skipped') && needs.changes.outputs.docker == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Prepare signing key
+        env:
+          ENCLAVE_SIGNING_KEY: ${{ secrets.ENCLAVE_SIGNING_KEY }}
+        run: |
+          umask 077
+          printenv ENCLAVE_SIGNING_KEY > "$RUNNER_TEMP/enclave-key.pem"
+
+      - name: Validate signing key
+        run: |
+          KEY="$RUNNER_TEMP/enclave-key.pem"
+
+          # Must be a valid RSA private key (openssl rsa fails for non-RSA keys)
+          if ! openssl rsa -in "$KEY" -check -noout 2>/dev/null; then
+            echo "::error::Signing key is not a valid RSA private key"
+            exit 1
+          fi
+
+          # Must be 3072-bit with exponent 3 (SGX SIGSTRUCT requirements)
+          KEY_INFO=$(openssl rsa -in "$KEY" -noout -text 2>/dev/null)
+          BIT_LEN=$(echo "$KEY_INFO" | head -1 | sed 's/[^0-9]*//' | cut -d' ' -f1)
+          EXPONENT=$(echo "$KEY_INFO" | grep publicExponent | sed 's/.*: \([0-9]*\).*/\1/')
+
+          if [[ "$BIT_LEN" != "3072" ]]; then
+            echo "::error::Signing key must be 3072-bit RSA, got: ${BIT_LEN}-bit"
+            exit 1
+          fi
+
+          if [[ "$EXPONENT" != "3" ]]; then
+            echo "::error::Signing key must have exponent 3, got: $EXPONENT"
+            exit 1
+          fi
+
+          echo "✓ Valid 3072-bit RSA key with exponent 3"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ghcr.io/relational-network/relational-sdk:sha-${{ github.sha }}
+            ${{ github.ref == 'refs/heads/staging' && 'ghcr.io/relational-network/relational-sdk:staging-latest' || '' }}
+            ${{ github.ref == 'refs/heads/main' && 'ghcr.io/relational-network/relational-sdk:latest' || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          secret-files: |
+            signing_key=${{ runner.temp }}/enclave-key.pem
+          build-args: |
+            SGX_DEBUG=0
+
+      - name: Shred signing key
+        if: always()
+        run: shred -u "$RUNNER_TEMP/enclave-key.pem" 2>/dev/null || true
+
+      - name: Print measurements to job summary
+        if: github.event_name == 'push'
+        run: |
+          echo "## Enclave Measurements" >> $GITHUB_STEP_SUMMARY
+          docker run --rm \
+            --entrypoint gramine-sgx-sigstruct-view \
+            ghcr.io/relational-network/relational-sdk:sha-${{ github.sha }} \
+            /app/relational-sdk.sig >> $GITHUB_STEP_SUMMARY
+
+      - name: Verify MRENCLAVE matches measurements.txt
+        if: github.event_name == 'push'
+        run: |
+          BUILT_MR=$(docker run --rm \
+            --entrypoint gramine-sgx-sigstruct-view \
+            ghcr.io/relational-network/relational-sdk:sha-${{ github.sha }} \
+            /app/relational-sdk.sig 2>/dev/null \
+            | grep 'mr_enclave:' | awk '{print $2}' | head -1)
+
+          EXPECTED_MR=$(grep '^mr_enclave:' measurements.txt | awk '{print $2}' | head -1)
+
+          echo "Built:    $BUILT_MR"
+          echo "Expected: $EXPECTED_MR  (measurements.txt)"
+
+          if [ "$BUILT_MR" != "$EXPECTED_MR" ]; then
+            echo "::error::MRENCLAVE changed!"
+            echo "  Built:    $BUILT_MR"
+            echo "  Expected: $EXPECTED_MR"
+            echo ""
+            echo "If this change is intentional, update measurements.txt in the same PR."
+            exit 1
+          fi
+          echo "✓ MRENCLAVE matches measurements.txt"

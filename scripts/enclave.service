@@ -3,6 +3,10 @@
 #
 # Systemd service for relational-sdk SGX enclave (Docker)
 #
+# The Docker image is pre-signed at build time (CI) — no signing key
+# needed on the deployment VM. The image tag is pinned to a commit SHA
+# via ENCLAVE_IMAGE_TAG in /opt/iob-micres/.env (written by the CD pipeline).
+#
 # Installation:
 #   sudo cp enclave.service /etc/systemd/system/enclave.service
 #   sudo systemctl daemon-reload
@@ -37,23 +41,22 @@ ExecStartPre=-/usr/bin/docker rm enclave
 ExecStartPre=/bin/bash -c 'for i in {1..60}; do curl -sf http://127.0.0.1:9100/.well-known/jwks.json >/dev/null 2>&1 && exit 0; sleep 1; done; echo "AVS JWKS not ready after 60s, continuing anyway..."'
 
 # Run the enclave container
+# - Image is pre-signed (no signing key needed on this VM)
+# - ENCLAVE_IMAGE_TAG is set by CD pipeline (e.g., sha-abc123def)
 # - Uses host networking for localhost AVS communication
 # - Passes through SGX devices for enclave execution
-# - Mounts signing key (read-only) for runtime signing
 # - Mounts data directory for persistent encrypted storage
 # - Mounts AVS TLS cert as the CA cert for secret provisioning verification
 ExecStart=/usr/bin/docker run --rm --name enclave \
     --network host \
     --device /dev/sgx/enclave \
     --device /dev/sgx/provision \
-    -v /opt/iob-micres/secrets/enclave-key.pem:/keys/enclave-key.pem:ro \
-    -v /opt/iob-micres/data:/data \
+    -v /opt/iob-micres/data:/app/data \
     -v /opt/iob-micres/secrets/avs-tls.crt:/etc/ssl/certs/avs-ca.crt:ro \
-    -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
     -e AVS_JWKS_URL \
     -e SECRET_PROVISION_SERVERS=127.0.0.1:4433 \
     -e RUST_LOG \
-    ghcr.io/relational-network/relational-sdk:staging-latest
+    ghcr.io/relational-network/relational-sdk:${ENCLAVE_IMAGE_TAG}
 
 ExecStop=/usr/bin/docker stop enclave
 

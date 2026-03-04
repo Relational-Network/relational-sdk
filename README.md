@@ -9,49 +9,70 @@ SGX enclave server with RA-TLS, JWT validation, and role-based access control (R
 - **RBAC**: Role-based access control (admin, user, read_only)
 - **WebCrypto Ready**: Exposes P-256 public key for browser-side encryption
 
+---
+
 ## Build
 
-### Build Requirements
+### Requirements
 
-⚠️ **IMPORTANT:** This project uses `aws-lc-rs` for cryptography, which requires **clang** 
-to compile on Ubuntu 20.04. GCC 9.4 has a memcmp bug that aws-lc-rs refuses to compile against.
+⚠️ **IMPORTANT:** `aws-lc-rs` requires **clang** on Ubuntu 20.04. GCC 9.4 has a memcmp bug
+that aws-lc-rs refuses to compile against. The Docker build already uses clang.
 
 ```bash
-# Install clang (Ubuntu 20.04)
 sudo apt-get install -y clang
-
-# Native builds require clang
-CC=clang CXX=clang++ make SGX=1 RA_TYPE=dcap
 ```
 
-The Docker build already uses clang (configured in Dockerfile).
-
-### Native (requires SGX hardware)
+### Native (requires SGX hardware + Gramine)
 
 ```bash
-# Build and sign enclave (use clang for aws-lc-rs)
-CC=clang CXX=clang++ make SGX=1 RA_TYPE=dcap
-
-# Run (debug mode for development)
+# Debug build (allows GDB, memory inspection — dev only)
+CC=clang CXX=clang++ make RA_TYPE=dcap SGX_DEBUG=1
 gramine-sgx relational-sdk
 
-# Run (production mode - no debug flag)
-make clean && CC=clang CXX=clang++ make SGX=1 RA_TYPE=dcap SGX_DEBUG=0
+# Production build
+CC=clang CXX=clang++ make RA_TYPE=dcap SGX_DEBUG=0
 gramine-sgx relational-sdk
 ```
+
+### Docker (no SGX hardware needed to build)
+
+The image is pre-signed at build time — no signing key is needed at runtime.
+
+```bash
+# Build (signs enclave at build time via BuildKit secret)
+make docker-build
+# or with a custom key:
+make docker-build SIGNING_KEY=/path/to/enclave-key.pem
+
+# Run (requires SGX hardware)
+make docker-run
+
+# Stop
+make docker-stop
+```
+
+Manual Docker run:
+
+```bash
+docker run --rm -d \
+  --name relational-sdk-sgx \
+  --network host \
+  --device /dev/sgx/enclave \
+  --device /dev/sgx/provision \
+  -e AVS_JWKS_URL=http://127.0.0.1:9100/.well-known/jwks.json \
+  -e SECRET_PROVISION_SERVERS=127.0.0.1:4433 \
+  relationalnetwork/relational-sdk:focal
+```
+
+---
 
 ## Local Development (Full Stack)
 
-### Prerequisites
-
-- **SGX Hardware**: Azure DCsv3 VM or bare-metal with SGX enabled
-- **Gramine**: `sudo apt install gramine`
-- **Clang**: `sudo apt install clang`
-- **AVS running**: See [attestation-verification-service README](../attestation-verification-service/README.md)
+Requires SGX hardware (Azure DCsv3 or bare-metal) and AVS running.
 
 ### Quick Start (3 terminals)
 
-**Terminal 1 - AVS:**
+**Terminal 1 — AVS:**
 ```bash
 cd ../attestation-verification-service
 AVS_SIGNING_KEY_PATH="$(pwd)/secrets/avs-signing-key.pem" \
@@ -61,524 +82,205 @@ RUST_LOG=info \
 ./target/release/attestation-verification-service
 ```
 
-**Terminal 2 - Enclave:**
+**Terminal 2 — Enclave:**
 ```bash
-# Build (one-time, or after code changes)
-CC=clang CXX=clang++ make SGX=1 RA_TYPE=dcap SGX_DEBUG=1
-
-# Run
+CC=clang CXX=clang++ make RA_TYPE=dcap SGX_DEBUG=1
 gramine-sgx relational-sdk
 ```
 
-**Terminal 3 - Test:**
+**Terminal 3 — Test:**
 ```bash
-# Health checks
 curl -s http://127.0.0.1:9100/health
 curl -sk https://127.0.0.1:8080/health
-
-# Get public key (no auth required)
 curl -sk https://127.0.0.1:8080/v1/attestation/public-key | jq
-
-# Test attestation (requires Clerk token via dashboard, or skip auth for testing)
-# Note: Direct curl to /v1/attest requires a Clerk JWT
 ```
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AVS_JWKS_URL` | `http://127.0.0.1:9100/.well-known/jwks.json` | AVS JWKS endpoint for token validation |
-| `RUST_LOG` | `info` | Log level (trace, debug, info, warn, error) |
+| `AVS_JWKS_URL` | `http://127.0.0.1:9100/.well-known/jwks.json` | AVS JWKS endpoint |
+| `SECRET_PROVISION_SERVERS` | — | Secret provisioning server (e.g. `127.0.0.1:4433`) |
+| `RUST_LOG` | `info` | Log level |
 
-### Debug vs Production Mode
+---
 
-The `SGX_DEBUG` flag controls whether the enclave runs in debug mode:
+## Enclave Measurements & Reproducibility
 
-| Mode | Command | Security |
-|------|---------|----------|
-| **Debug** | `make SGX=1 RA_TYPE=dcap SGX_DEBUG=1` | ⚠️ Allows GDB attach, memory inspection |
-| **Production** | `make SGX=1 RA_TYPE=dcap SGX_DEBUG=0` | ✅ Secure, no debug access |
+The MRENCLAVE hash uniquely identifies the enclave binary and trusted files. `measurements.txt`
+is the committed source of truth.
 
-**Always use `SGX_DEBUG=0` for staging/production deployments.**
-
-### Docker (requires SGX hardware)
-
-> **Note:** The Docker image is based on Ubuntu 20.04 (focal) for compatibility with
-> Gramine, Intel SGX, and Azure DCAP libraries.
+**Current measurements:** [`measurements.txt`](measurements.txt)
 
 ```bash
-# Build Docker image
-make docker-build
+# Build locally (no cache) and compare against measurements.txt
+make verify-mrenclave
 
-# Run container (requires SGX devices)
-make docker-run
-
-# Stop container
-make docker-stop
+# Also compare against a specific GHCR image
+make verify-mrenclave DOCKER_IMAGE=ghcr.io/relational-network/relational-sdk:sha-<commit>
 ```
 
-Manual Docker run with host networking (recommended for E2E testing):
+**When MRENCLAVE changes** (code, Gramine/SGX packages, Rust toolchain, or `SGX_DEBUG` changes):
+1. Run `make verify-mrenclave` — prints both old and new hashes
+2. Update `measurements.txt` with the new hash
+3. Commit code change + `measurements.txt` together in the same PR
 
-```bash
-docker run --rm -d \
-  --name relational-sdk-sgx \
-  --network host \
-  --device /dev/sgx/enclave \
-  --device /dev/sgx/provision \
-  -v "$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
-  -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
-  -e AVS_JWKS_URL=http://127.0.0.1:9100/.well-known/jwks.json \
-  relationalnetwork/relational-sdk:focal
-```
+CI fails if the built `mr_enclave` differs from `measurements.txt`, preventing silent changes.
 
-### Local Dev (Docker: AVS + relational-sdk)
+| Factor | MRENCLAVE | MRSIGNER |
+|--------|:---------:|:--------:|
+| Source code | ✅ | ❌ |
+| Gramine / SGX package versions | ✅ | ❌ |
+| Rust toolchain | ✅ | ❌ |
+| `SGX_DEBUG` | ✅ | ❌ |
+| Signing key | ❌ | ✅ |
 
-```bash
-# 1. Start AVS (see ../attestation-verification-service/README.md)
-#    AVS must be on host network so 127.0.0.1:9100 is reachable.
-
-# 2. Start relational-sdk (host network)
-docker run --rm -d --name relational-sdk-sgx --network host \
-  --device /dev/sgx/enclave --device /dev/sgx/provision \
-  -v "$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
-  -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
-  -e AVS_JWKS_URL=http://127.0.0.1:9100/.well-known/jwks.json \
-  relationalnetwork/relational-sdk:focal
-
-# 3. Verify AVS reachability from inside the SDK container
-docker exec relational-sdk-sgx curl -s http://127.0.0.1:9100/.well-known/jwks.json | jq
-```
-
-Notes:
-- If AVS is behind Caddy (HTTPS), set `AVS_JWKS_URL` to `https://127.0.0.1:9100/.well-known/jwks.json`.
-- `--network host` is required for the SDK to reach AVS on `127.0.0.1`.
-
-Manual Docker run with port mapping:
-
-```bash
-docker run --rm -it \
-  --name relational-sdk-sgx \
-  --device /dev/sgx/enclave \
-  --device /dev/sgx/provision \
-  -p 8080:8080 \
-  -v "$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
-  -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
-  -e AVS_JWKS_URL=https://your-avs-host:9100/.well-known/jwks.json \
-  relationalnetwork/relational-sdk:focal
-```
-
-### Quick E2E Test (Docker, host network)
-
-```bash
-# 1. Run enclave container (AVS should already be running)
-docker run --rm -d --name enclave --network host \
-  --device /dev/sgx/enclave --device /dev/sgx/provision \
-  -v "$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
-  -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
-  -e AVS_JWKS_URL=http://127.0.0.1:9100/.well-known/jwks.json \
-  relationalnetwork/relational-sdk:focal
-
-# 2. Test health
-curl -sk https://127.0.0.1:8080/health
-
-# 3. Get enclave public key
-curl -sk https://127.0.0.1:8080/v1/attestation/public-key | jq
-```
+---
 
 ## Deployment
 
-### ✅ Automated CI/CD via Staging VM
+### CI/CD Overview
 
-**relational-sdk requires SGX hardware to build.** CI/CD builds on the staging VM (which has SGX) and pushes to GHCR.
+- **CI** (`ci.yml`): Lint, test, build + sign Docker image, push to GHCR, verify MRENCLAVE matches `measurements.txt`
+- **CD** (`cd-staging.yml`): Pull pre-built image from GHCR, deploy to staging VM
 
-- **CI** (`.github/workflows/ci.yml`): Lint, test (non-SGX) on push/PR  
-- **CD** (`.github/workflows/cd-staging.yml`): SSH to staging → build Docker → push to GHCR → deploy
-- **Trigger**: Push to `staging` branch
-- **Image**: `ghcr.io/relational-network/relational-sdk:staging-latest`
+The staging VM does **not** build or sign — it only runs the pre-built image from GHCR.
+
+**Image tags:**
+- `sha-<commit>` — every push (canonical, used by CD)
+- `staging-latest` — latest `staging` branch push
+- `latest` — latest `main` branch push
 
 ### Staging Deployment
 
-**Live URL:** https://iob-staging.duckdns.org (via Caddy reverse proxy)
-
+**Live URL:** https://iob-staging.duckdns.org
 **VM:** Azure DCsv3 (`iob-staging` in resource group `iob`)
 
-**Automated Deployment:**
 ```bash
-# Push to staging branch triggers CD
+# Push to staging branch — triggers CI (build + sign) then CD (pull + deploy)
 git checkout staging
 git merge main
 git push origin staging
-# CD workflow: builds on VM → pushes to GHCR → restarts service → verifies health
 ```
 
-**Manual Deployment (if needed):**
-```bash
-# SSH into staging VM
-ssh azureuser@20.86.174.127
-
-# Run deployment script
-cd /opt/relational-sdk
-./scripts/deploy-staging.sh
-```
-
-The CD workflow / script will:
-1. Pull latest code from git
-2. Build Docker image with SGX support
-3. Push image to GHCR
-4. Extract and validate measurements (MRSIGNER change = failure)
-5. Update `/opt/iob-micres/.env` with new MRENCLAVE
-6. Restart enclave and AVS services
-7. Verify health and attestation
-
-### Systemd Service (Docker-based)
-
-The enclave runs as a Docker container managed by systemd:
+### Systemd Service
 
 ```bash
-# Install service file
-sudo cp scripts/enclave.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable enclave
 sudo systemctl start enclave
-
-# View logs
-sudo journalctl -u enclave -f
-
-# Status
 sudo systemctl status enclave
+sudo journalctl -u enclave -f
 ```
 
-### Manual Docker Run (for testing)
-
-SSH into the staging VM and run:
-
-```bash
-# 1. Pull the image
-docker pull ghcr.io/relational-network/relational-sdk:staging-latest
-
-# 2. Run container
-docker run --rm -d --name enclave \
-  --network host \
-  --device /dev/sgx/enclave \
-  --device /dev/sgx/provision \
-  -v /opt/iob-micres/secrets/enclave-key.pem:/keys/enclave-key.pem:ro \
-  -v /opt/iob-micres/data:/data \
-  -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
-  -e AVS_JWKS_URL=http://127.0.0.1:9100/.well-known/jwks.json \
-  ghcr.io/relational-network/relational-sdk:staging-latest
-
-# 3. Verify
-curl -sk https://127.0.0.1:8080/health
-```
-
-### Build from Source on Staging VM (if needed)
-
-```bash
-# 1. Clone the repo
-cd /opt
-sudo git clone https://github.com/Relational-Network/relational-sdk.git
-cd relational-sdk
-
-# 2. Install Rust (if not installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
-
-# 3. Build the enclave
-make SGX=1 RA_TYPE=dcap
-
-# 4. Extract and record measurements
-gramine-sgx-sigstruct-view relational-sdk.sig
-# Note: MRENCLAVE and MRSIGNER values - update AVS config if changed
-
-# 5. Test locally
-gramine-sgx relational-sdk &
-curl -sk https://127.0.0.1:8080/health
-
-# 6. If using systemd, restart the service
-sudo systemctl restart enclave
-```
-
-### Update AVS with New Measurements
-
-After building, if MRENCLAVE changed, update AVS config:
-
-```bash
-# On staging VM
-sudo nano /opt/iob-micres/.env
-# Update AVS_EXPECTED_MRENCLAVE=<new_value>
-
-sudo systemctl restart avs
-```
-
-### Required GitHub Secrets (for CI/CD)
+### Required GitHub Secrets
 
 | Secret | Description |
 |--------|-------------|
-| `STAGING_HOST` | Staging VM IP (20.86.174.127) |
-| `STAGING_USER` | SSH user (azureuser) |
+| `STAGING_HOST` | Staging VM IP |
+| `STAGING_USER` | SSH user |
 | `STAGING_SSH_KEY` | SSH private key for staging VM |
 | `GHCR_TOKEN` | PAT with `read:packages`, `write:packages` |
+| `ENCLAVE_SIGNING_KEY` | PEM content of enclave signing key (`cat enclave-key.pem`) |
 
-### Enclave Signing
+### Signing Key Setup (one-time)
 
-SGX enclaves must be signed before running. The signing key should be kept secure and NOT committed to git.
-
-```bash
-# Generate signing key (one-time, keep secure)
-gramine-sgx-gen-private-key ~/.config/gramine/enclave-key.pem
-
-# View enclave measurements after build
-make show-measurements
-```
-
-## SGX VM Requirements
-
-Install required dependencies on SGX-capable VM:
+The enclave is signed at CI build time via `--mount=type=secret`. The key is never stored
+in any Docker layer or on the staging VM.
 
 ```bash
-# Gramine repository
-sudo curl -fsSLo /usr/share/keyrings/gramine-keyring.gpg \
-  https://packages.gramineproject.io/gramine-keyring.gpg
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gramine-keyring.gpg] \
-  https://packages.gramineproject.io/ $(lsb_release -sc) main" \
-  | sudo tee /etc/apt/sources.list.d/gramine.list
+# Generate signing key
+openssl genrsa -out ~/.config/gramine/enclave-key.pem -3 3072
 
-# Intel SGX repository
-sudo curl -fsSLo /usr/share/keyrings/intel-sgx-deb.asc \
-  https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-sgx-deb.asc] \
-  https://download.01.org/intel-sgx/sgx_repo/ubuntu $(lsb_release -sc) main" \
-  | sudo tee /etc/apt/sources.list.d/intel-sgx.list
-
-# Azure DCAP client (for Azure DCsv3 VMs)
-wget -qO- https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add
-sudo add-apt-repository "deb [arch=amd64] https://packages.microsoft.com/ubuntu/$(lsb_release -rs)/prod $(lsb_release -cs) main"
-
-# Install packages
-sudo apt-get update
-sudo apt-get install -y \
-  gramine \
-  gramine-ratls-dcap \
-  sgx-aesm-service \
-  libsgx-aesm-ecdsa-plugin \
-  libsgx-aesm-quote-ex-plugin \
-  az-dcap-client \
-  gcc make pkg-config libssl-dev libffi-dev
+# Add to GitHub secret ENCLAVE_SIGNING_KEY
+cat ~/.config/gramine/enclave-key.pem
 ```
+
+---
 
 ## Endpoints
 
-All API endpoints are versioned with `/v1/` prefix. Health endpoints remain unversioned for k8s probe compatibility.
+Health endpoints are unversioned; all others use `/v1/` prefix.
 
-### Health (unversioned)
-- `GET /health` → readiness summary (200 or 503)
-- `GET /health/live` → liveness details
-- `GET /health/ready` → readiness details (200 or 503)
+### Health
+- `GET /health` — readiness summary (200 or 503)
+- `GET /health/live` — liveness
+- `GET /health/ready` — readiness
 
 ### Attestation
-- `GET /v1/attestation/public-key` → enclave public key (JWK) for browser encryption
+- `GET /v1/attestation/public-key` — enclave public key (JWK)
 
 ### Protected (require JWT)
-- `GET /v1/protected` → any authenticated user
-- `GET /v1/admin/status` → admin role required
-- `POST /v1/data/validate` → validate CSV (multipart) against `schema_id`
-- `POST /v1/data/upload-file` → validate + persist CSV (multipart)
-- `POST /v1/data/upload` → user or admin role required
-- `GET /v1/data/query` → read_only, user, or admin role
+- `GET /v1/protected` — any authenticated user
+- `GET /v1/admin/status` — admin only
+- `POST /v1/data/validate` — validate CSV against `schema_id`
+- `POST /v1/data/upload-file` — validate + persist CSV
+- `POST /v1/data/upload` — user or admin
+- `GET /v1/data/query` — read_only, user, or admin
 
-### Documentation
-- `GET /docs` → Swagger UI
-- `GET /api-doc/openapi.json` → OpenAPI spec
+### Docs
+- `GET /docs` — Swagger UI
+- `GET /api-doc/openapi.json` — OpenAPI spec
+
+---
 
 ## JWT Authentication
 
-### How It Works
+1. Client calls AVS `POST /v1/attest` with enclave URL → receives signed JWT
+2. Client sends JWT in `Authorization: Bearer <token>`
+3. Enclave validates JWT against AVS JWKS
 
-1. Client obtains JWT from AVS by calling `POST /attest` with enclave URL
-2. AVS verifies enclave via RA-TLS and issues signed JWT
-3. Client sends JWT in `Authorization: Bearer <token>` header
-4. Enclave validates JWT against AVS JWKS and extracts user/role
+**Required claims:** `iss`, `sub`, `aud` (`relational-sdk`), `exp`, `role` (`admin`/`user`/`read_only`)
 
-### Token Claims
-
-The enclave expects these claims in AVS-issued tokens:
-
-| Claim | Description |
-|-------|-------------|
-| `iss` | Issuer (must be AVS) |
-| `sub` | Subject (user identifier) |
-| `aud` | Audience (must be `relational-sdk`) |
-| `exp` | Expiration timestamp |
-| `role` | User role: `admin`, `user`, or `read_only` |
-
-### Role Hierarchy
-
-Roles follow a hierarchy where higher roles include lower permissions:
-
-- **admin** → Full access (includes user and read_only)
-- **user** → Read/write access (includes read_only)
-- **read_only** → Read-only access
-
-### Example: Calling Protected Endpoints
+**Role hierarchy:** `admin` ⊃ `user` ⊃ `read_only`
 
 ```bash
-# 1. Get attestation token from AVS (use HTTPS if AVS is in HTTPS mode)
 TOKEN=$(curl -sk -X POST https://127.0.0.1:9100/v1/attest \
   -H 'Content-Type: application/json' \
   -d '{"enclave_url":"https://127.0.0.1:8080","user_id":"alice","role":"admin"}' \
   | jq -r '.token')
 
-# 2. Call protected endpoint with token
-curl -sk https://127.0.0.1:8080/v1/protected \
-  -H "Authorization: Bearer $TOKEN"
-
-# 3. Call admin endpoint
-curl -sk https://127.0.0.1:8080/v1/admin/status \
-  -H "Authorization: Bearer $TOKEN"
-
-# 4. Upload data (requires user or admin role)
-curl -sk -X POST https://127.0.0.1:8080/v1/data/upload \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"encrypted_data":"base64..."}'
-
-# 5. Validate CSV (multipart pre-check, no persistence)
-curl -sk -X POST https://127.0.0.1:8080/v1/data/validate \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "schema_id=pilot_v1" \
-  -F "file=@./sample.csv"
-
-# 6. Upload CSV (multipart, validated before persistence)
-curl -sk -X POST https://127.0.0.1:8080/v1/data/upload-file \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "schema_id=pilot_v1" \
-  -F "file=@./sample.csv"
-
-# 7. Query data (requires read_only, user, or admin role)
-curl -sk https://127.0.0.1:8080/v1/data/query \
-  -H "Authorization: Bearer $TOKEN"
+curl -sk https://127.0.0.1:8080/v1/protected -H "Authorization: Bearer $TOKEN"
+curl -sk https://127.0.0.1:8080/v1/admin/status -H "Authorization: Bearer $TOKEN"
 ```
 
-### JWKS Caching
-
-The enclave caches JWKS from AVS with a 5-minute TTL:
-- Default URL: `http://127.0.0.1:9100/.well-known/jwks.json`
-- Configure via `AVS_JWKS_URL` environment variable for HTTPS:
-  ```bash
-  export AVS_JWKS_URL=https://avs.example.com/.well-known/jwks.json
-  ```
-- Automatically refreshed when TTL expires
-- Supports self-signed certificates for development
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TLS_CERT_PATH` | `/tmp/ra-tls.crt.pem` | RA-TLS certificate path |
-| `TLS_KEY_PATH` | `/tmp/ra-tls.key.pem` | RA-TLS private key path |
-| `DATA_DIR` | (none) | If set, readiness verifies directory exists |
-| `AVS_JWKS_URL` | `http://127.0.0.1:9100/.well-known/jwks.json` | AVS JWKS endpoint for token validation |
-
-Note: `0.0.0.0` is a bind address, not a browser URL. Use `https://127.0.0.1:8080/docs`
-or `https://<vm-ip>:8080/docs` depending on where you're accessing the server from.
-
-## Threads and SGX
-
-The runtime uses `worker_threads = 2` to keep enclave thread usage predictable. When sizing
-`sgx.max_threads`, account for:
-- 4 Gramine/helper threads (main + IPC + async + one TLS-handshake)
-- Tokio worker threads (currently 2)
-- Any extra threads from blocking pools or future background tasks
-
-## RA-TLS (DCAP)
-
-When running in SGX with Gramine, the manifest uses `gramine-ratls` to generate a RA-TLS
-certificate and key in `/tmp`. The server reads the fixed paths:
-- `/tmp/ra-tls.crt.pem`
-- `/tmp/ra-tls.key.pem`
-
-TLS is required for RA-TLS deployments; the server will fail fast if the files are missing.
-
-Example:
-
-```bash
-make SGX=1 RA_TYPE=dcap
-gramine-sgx relational-sdk
-```
+---
 
 ## Testing Attestation
 
-A C-based RA-TLS verification client is included in `attestation-client/` for testing SGX attestation. It uses Intel DCAP to verify the SGX quote embedded in the RA-TLS certificate.
-
-### Quick Start
+A C-based RA-TLS client in `attestation-client/` verifies the SGX quote in the TLS certificate.
 
 ```bash
-# Terminal 1: Start the enclave
-make SGX=1 RA_TYPE=dcap
-gramine-sgx relational-sdk
-
-# Terminal 2: Test attestation
-make test-attest
+make test-attest        # basic attestation test
+make test-attest-all    # includes negative tests (wrong MRENCLAVE/MRSIGNER)
+make show-measurements  # print current enclave measurements from .sig
 ```
 
-### Available Test Commands
+See [`attestation-client/README.md`](attestation-client/README.md) for details.
 
-| Command | Description |
-|---------|-------------|
-| `make attest` | Build attestation client |
-| `make test-attest` | Test attestation (auto-extracts measurements from .sig) |
-| `make test-attest-all` | Run all tests including negative tests |
-| `make show-measurements` | Show current enclave measurements |
+---
 
-### Testing Against Remote Enclave
+## Configuration
 
-```bash
-# Test against a remote enclave
-cd attestation-client
-make test HOST=enclave.example.com PORT=443
-```
-
-### Verifying Wrong Measurements Are Rejected
-
-```bash
-make test-attest-all
-# Output shows:
-# ✓ Correctly rejected wrong MRENCLAVE
-# ✓ Correctly rejected wrong MRSIGNER
-```
-
-### How It Works
-
-1. Client connects to enclave over TLS
-2. During handshake, receives RA-TLS certificate containing SGX quote
-3. `libra_tls_verify_dcap.so` verifies the quote via Intel DCAP
-4. Client compares enclave measurements (MRENCLAVE, MRSIGNER) against expected values
-5. If all checks pass, handshake completes and client can communicate securely
-
-See `attestation-client/README.md` for detailed documentation.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AVS_JWKS_URL` | `http://127.0.0.1:9100/.well-known/jwks.json` | AVS JWKS endpoint |
+| `SECRET_PROVISION_SERVERS` | — | Secret provisioning server |
+| `RUST_LOG` | `info` | Log level |
+| `TLS_CERT_PATH` | `/tmp/ra-tls.crt.pem` | RA-TLS certificate |
+| `TLS_KEY_PATH` | `/tmp/ra-tls.key.pem` | RA-TLS private key |
+| `DATA_DIR` | — | If set, readiness checks this directory exists |
 
 ## Module Structure
 
-The codebase is organized into logical modules:
-
 | Module | Description |
 |--------|-------------|
-| `main.rs` | Application entry point, router setup |
+| `main.rs` | Entry point, router |
 | `config.rs` | Configuration constants |
-| `auth.rs` | JWT validation, JWKS caching, RBAC extractors |
+| `auth.rs` | JWT validation, JWKS caching, RBAC |
 | `crypto.rs` | Enclave keypair, JWK types |
-| `handlers.rs` | HTTP request handlers |
-| `health.rs` | Health check endpoints |
-| `tls.rs` | TLS utilities and PEM normalization |
-
-## Related Documentation
-
-- [STAGING-DEPLOYMENT.md](../STAGING-DEPLOYMENT.md) - Full staging deployment guide
-- [AGENTS.md](../AGENTS.md) - Architecture and development context
-- [scripts/deploy-staging.sh](scripts/deploy-staging.sh) - Automated staging deployment script
+| `handlers.rs` | HTTP handlers |
+| `health.rs` | Health endpoints |
+| `tls.rs` | TLS utilities |
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later), see LICENSE for details.
+AGPL-3.0-or-later — see LICENSE.

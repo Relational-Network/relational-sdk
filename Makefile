@@ -69,7 +69,8 @@ relational-sdk.manifest: relational-sdk.manifest.template $(SELF_EXE)
 relational-sdk.manifest.sgx relational-sdk.sig &: relational-sdk.manifest
 	gramine-sgx-sign \
 		--manifest $< \
-		--output $<.sgx
+		--output $<.sgx \
+		--date 0000-00-00
 
 GRAMINE = gramine-sgx
 
@@ -84,9 +85,15 @@ clean:
 
 ##################### DOCKER BUILD AND RUN ###################################
 
+# Signing key path (required for Docker builds)
+SIGNING_KEY ?= $(HOME)/.config/gramine/enclave-key.pem
+
+# Build a signed Docker image with deterministic MRENCLAVE.
+# Usage: make docker-build
+# Usage: make docker-build SIGNING_KEY=/path/to/enclave-key.pem
 .PHONY: docker-build
 docker-build:
-	cd docker && sudo ./build.sh ubuntu20
+	cd docker && sudo ./build.sh ubuntu20 $(SIGNING_KEY)
 
 .PHONY: docker-run
 docker-run:
@@ -95,9 +102,7 @@ docker-run:
 		--network host \
 		--device /dev/sgx/enclave \
 		--device /dev/sgx/provision \
-		-v "$$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
-		-v "$(SECRETS_DIR)/avs-tls.crt:/etc/ssl/certs/avs-ca.crt:ro" \
-		-e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
+		-v "$(abspath $(SECRETS_DIR)/avs-tls.crt):/etc/ssl/certs/avs-ca.crt:ro" \
 		-e SECRET_PROVISION_SERVERS=127.0.0.1:4433 \
 		relationalnetwork/relational-sdk:focal
 
@@ -126,6 +131,60 @@ test-attest-all:
 .PHONY: show-measurements
 show-measurements: relational-sdk.sig
 	@gramine-sgx-sigstruct-view relational-sdk.sig | grep -E "mr_enclave|mr_signer|isv_prod_id|isv_svn"
+
+# Verify MRENCLAVE reproducibility
+# Default: build locally (no cache) and compare mr_enclave against measurements.txt
+# With DOCKER_IMAGE=...: also compare against a remote image's mr_enclave
+#
+# Usage: make verify-mrenclave
+# Usage: make verify-mrenclave DOCKER_IMAGE=ghcr.io/relational-network/relational-sdk:sha-abc123
+.PHONY: verify-mrenclave
+verify-mrenclave:
+	@if [ ! -f "$(SIGNING_KEY)" ]; then \
+		echo "ERROR: Signing key not found at $(SIGNING_KEY)"; \
+		echo "Set SIGNING_KEY=/path/to/enclave-key.pem"; \
+		exit 1; \
+	fi
+	@echo "=== Building locally (no cache) ===" && \
+	DOCKER_BUILDKIT=1 docker build \
+		--platform linux/amd64 \
+		--no-cache \
+		-f docker/Dockerfile \
+		--secret id=signing_key,src=$(SIGNING_KEY) \
+		--build-arg SGX_DEBUG=0 \
+		--progress=plain \
+		-t relationalnetwork/relational-sdk:verify-local \
+		. 2>&1 | grep -E "Build-time measurements|mr_enclave|mr_signer" || true
+	@LOCAL_MR=$$(docker run --rm \
+		--entrypoint gramine-sgx-sigstruct-view \
+		relationalnetwork/relational-sdk:verify-local \
+		/app/relational-sdk.sig 2>/dev/null | grep 'mr_enclave:' | awk '{print $$2}' | head -1); \
+	EXPECTED_MR=$$(grep '^mr_enclave:' measurements.txt | awk '{print $$2}' | head -1); \
+	echo ""; \
+	echo "Built:    $$LOCAL_MR"; \
+	echo "Expected: $$EXPECTED_MR  (measurements.txt)"; \
+	echo ""; \
+	if [ "$$LOCAL_MR" = "$$EXPECTED_MR" ]; then \
+		echo "MATCH - MRENCLAVE matches measurements.txt"; \
+	else \
+		echo "MISMATCH - MRENCLAVE differs from measurements.txt!"; \
+		echo "If intentional, update measurements.txt with the new hash."; \
+		exit 1; \
+	fi; \
+	if [ -n "$(DOCKER_IMAGE)" ]; then \
+		echo ""; \
+		echo "=== Comparing against $(DOCKER_IMAGE) ==="; \
+		REMOTE_MR=$$(docker run --rm --entrypoint gramine-sgx-sigstruct-view \
+			$(DOCKER_IMAGE) /app/relational-sdk.sig 2>/dev/null \
+			| grep 'mr_enclave:' | awk '{print $$2}' | head -1); \
+		echo "Remote:   $$REMOTE_MR"; \
+		if [ "$$LOCAL_MR" = "$$REMOTE_MR" ]; then \
+			echo "MATCH - MRENCLAVE matches Docker image"; \
+		else \
+			echo "MISMATCH - MRENCLAVE differs from Docker image!"; \
+			exit 1; \
+		fi; \
+	fi
 
 .PHONY: distclean
 distclean: clean
