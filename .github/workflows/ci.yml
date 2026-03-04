@@ -146,28 +146,22 @@ jobs:
         run: |
           KEY="$RUNNER_TEMP/enclave-key.pem"
 
-          # Must be a valid PEM private key
-          if ! openssl pkey -in "$KEY" -noout 2>/dev/null; then
-            echo "::error::Signing key is not a valid PEM private key"
+          # Must be a valid RSA private key (openssl rsa fails for non-RSA keys)
+          if ! openssl rsa -in "$KEY" -check -noout 2>/dev/null; then
+            echo "::error::Signing key is not a valid RSA private key"
             exit 1
           fi
 
-          # Must be RSA (SGX requires RSA for SIGSTRUCT)
-          KEY_TYPE=$(openssl pkey -in "$KEY" -noout -text 2>/dev/null | head -1)
-          if [[ "$KEY_TYPE" != *"RSA"* ]]; then
-            echo "::error::Signing key must be RSA, got: $KEY_TYPE"
-            exit 1
-          fi
+          # Must be 3072-bit with exponent 3 (SGX SIGSTRUCT requirements)
+          KEY_INFO=$(openssl rsa -in "$KEY" -noout -text 2>/dev/null)
+          BIT_LEN=$(echo "$KEY_INFO" | head -1 | sed 's/[^0-9]*//' | cut -d' ' -f1)
+          EXPONENT=$(echo "$KEY_INFO" | grep publicExponent | sed 's/.*: \([0-9]*\).*/\1/')
 
-          # Must be 3072-bit (SGX requirement)
-          BIT_LEN=$(openssl rsa -in "$KEY" -noout -text 2>/dev/null | grep -oP '(?<=Private-Key: \()\d+')
           if [[ "$BIT_LEN" != "3072" ]]; then
             echo "::error::Signing key must be 3072-bit RSA, got: ${BIT_LEN}-bit"
             exit 1
           fi
 
-          # Must have public exponent 3 (SGX requirement)
-          EXPONENT=$(openssl rsa -in "$KEY" -noout -text 2>/dev/null | grep publicExponent | grep -oP '\d+(?= \()')
           if [[ "$EXPONENT" != "3" ]]; then
             echo "::error::Signing key must have exponent 3, got: $EXPONENT"
             exit 1
