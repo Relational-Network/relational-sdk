@@ -8,6 +8,7 @@
 # the staging VM only needs Docker and SGX hardware to run the enclave.
 #
 # Flow:
+#   0. Triggered automatically AFTER CI succeeds (workflow_run)
 #   1. Verify staging VM is reachable via SSH
 #   2. Pull sha-<commit> image from GHCR
 #   3. Extract measurements, validate MRSIGNER hasn't changed, update .env
@@ -17,7 +18,9 @@
 name: CD - Staging
 
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [staging]
   workflow_dispatch:
 
@@ -26,9 +29,20 @@ env:
   IMAGE_NAME: relational-network/relational-sdk
 
 jobs:
+  # Gate: only deploy if CI succeeded (workflow_dispatch always runs)
+  gate:
+    name: Check CI Result
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - run: echo "CI passed — proceeding with deployment"
+
   check-staging-online:
     name: Check Staging VM is Online
     runs-on: ubuntu-latest
+    needs: gate
     outputs:
       online: ${{ steps.check.outputs.online }}
     steps:
@@ -83,7 +97,7 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_USER }}
