@@ -23,6 +23,7 @@ on:
     types: [completed]
     branches: [staging]
   workflow_dispatch:
+    branches: [staging]
 
 env:
   REGISTRY: ghcr.io
@@ -82,15 +83,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: scripts/enclave.service
+          sparse-checkout: scripts/
 
-      - name: Copy service file to staging VM
+      - name: Copy scripts to staging VM
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
-          source: scripts/enclave.service
+          source: scripts/
           target: /tmp/
 
       - name: Deploy via SSH
@@ -107,6 +108,14 @@ jobs:
           script: |
             set -e
 
+            # Cleanup function: always re-enable health-check timer and remove lock
+            cleanup() {
+                echo "=== Cleanup: re-enabling health-check timer ==="
+                sudo systemctl start health-check.timer 2>/dev/null || true
+                sudo rm -f /opt/iob-micres/.deploying
+            }
+            trap cleanup EXIT
+
             echo "=============================================="
             echo "  relational-sdk CD - Deploying Pre-Built Image"
             echo "=============================================="
@@ -121,10 +130,10 @@ jobs:
                 exit 1
             fi
 
-            echo "=== Stopping current enclave ==="
-            sudo systemctl stop enclave || true
-            sudo docker stop enclave 2>/dev/null || true
-            sudo docker rm enclave 2>/dev/null || true
+            # ── Phase 1: Prepare (enclave still running) ──────────────
+            echo "=== Disabling health-check timer during deployment ==="
+            sudo systemctl stop health-check.timer || true
+            sudo touch /opt/iob-micres/.deploying
 
             echo "=== Pulling pre-built image ==="
             echo "$GHCR_TOKEN" | sudo docker login ghcr.io -u relational-network --password-stdin
@@ -144,13 +153,6 @@ jobs:
             echo "MRENCLAVE: $MRENCLAVE"
             echo "MRSIGNER:  $MRSIGNER"
 
-            # Write image tag so enclave.service knows which image to run
-            if grep -q "^ENCLAVE_IMAGE_TAG=" "$ENV_FILE"; then
-                sudo sed -i "s/^ENCLAVE_IMAGE_TAG=.*/ENCLAVE_IMAGE_TAG=sha-${COMMIT_SHA}/" "$ENV_FILE"
-            else
-                echo "ENCLAVE_IMAGE_TAG=sha-${COMMIT_SHA}" | sudo tee -a "$ENV_FILE"
-            fi
-
             # Validate MRSIGNER hasn't changed (indicates signing key mismatch)
             if [ -f "$ENV_FILE" ]; then
                 EXISTING_MRSIGNER=$(grep "^AVS_EXPECTED_MRSIGNER=" "$ENV_FILE" | cut -d= -f2)
@@ -162,30 +164,89 @@ jobs:
                     echo "If intentional, update AVS_EXPECTED_MRSIGNER in $ENV_FILE manually."
                     exit 1
                 fi
-                
-                echo "=== Updating $ENV_FILE with new MRENCLAVE ==="
-                if grep -q "^AVS_EXPECTED_MRENCLAVE=" "$ENV_FILE"; then
-                    sudo sed -i "s/^AVS_EXPECTED_MRENCLAVE=.*/AVS_EXPECTED_MRENCLAVE=$MRENCLAVE/" "$ENV_FILE"
+            fi
+
+            # Update .env BEFORE stopping enclave so any accidental restart
+            # picks up the correct image tag and measurements
+            echo "=== Updating $ENV_FILE ==="
+            if grep -q "^ENCLAVE_IMAGE_TAG=" "$ENV_FILE"; then
+                sudo sed -i "s/^ENCLAVE_IMAGE_TAG=.*/ENCLAVE_IMAGE_TAG=sha-${COMMIT_SHA}/" "$ENV_FILE"
+            else
+                echo "ENCLAVE_IMAGE_TAG=sha-${COMMIT_SHA}" | sudo tee -a "$ENV_FILE"
+            fi
+
+            if grep -q "^AVS_EXPECTED_MRENCLAVE=" "$ENV_FILE"; then
+                sudo sed -i "s/^AVS_EXPECTED_MRENCLAVE=.*/AVS_EXPECTED_MRENCLAVE=$MRENCLAVE/" "$ENV_FILE"
+            else
+                echo "AVS_EXPECTED_MRENCLAVE=$MRENCLAVE" | sudo tee -a "$ENV_FILE"
+            fi
+
+            echo "=== Updating service files if changed ==="
+            for unit in enclave.service health-check.service health-check.timer; do
+                if [ -f "/tmp/scripts/$unit" ]; then
+                    if ! diff -q "/tmp/scripts/$unit" "/etc/systemd/system/$unit" > /dev/null 2>&1; then
+                        echo "$unit changed, installing updated version"
+                        sudo cp "/tmp/scripts/$unit" "/etc/systemd/system/$unit"
+                        sudo chmod 644 "/etc/systemd/system/$unit"
+                    else
+                        echo "$unit unchanged"
+                    fi
+                fi
+            done
+
+            echo "=== Updating health-check script if changed ==="
+            if [ -f /tmp/scripts/health-check.sh ]; then
+                if ! diff -q /tmp/scripts/health-check.sh /opt/iob-micres/scripts/health-check.sh > /dev/null 2>&1; then
+                    echo "health-check.sh changed, installing updated version"
+                    sudo cp /tmp/scripts/health-check.sh /opt/iob-micres/scripts/health-check.sh
+                    sudo chmod +x /opt/iob-micres/scripts/health-check.sh
                 else
-                    echo "AVS_EXPECTED_MRENCLAVE=$MRENCLAVE" | sudo tee -a "$ENV_FILE"
+                    echo "health-check.sh unchanged"
                 fi
             fi
-            
-            echo "=== Updating enclave.service if changed ==="
-            if ! diff -q /tmp/scripts/enclave.service /etc/systemd/system/enclave.service > /dev/null 2>&1; then
-                echo "enclave.service changed, installing updated version"
-                sudo cp /tmp/scripts/enclave.service /etc/systemd/system/enclave.service
-                sudo chmod 644 /etc/systemd/system/enclave.service
-            else
-                echo "enclave.service unchanged"
-            fi
-            rm -f /tmp/scripts/enclave.service
 
-            echo "=== Reloading and starting enclave service ==="
+            rm -rf /tmp/scripts
+
             sudo systemctl daemon-reload
+
+            # ── Phase 2: Atomic stop → start ──────────────────────────
+            echo "=== Stopping current enclave ==="
+            sudo systemctl stop enclave || true
+            # Extra safety: ensure leftover container is removed
+            sudo docker stop enclave 2>/dev/null || true
+            sudo docker rm enclave 2>/dev/null || true
+
+            echo "=== Starting enclave with new image ==="
             sudo systemctl start enclave
             sleep 15
-            
+
+            # ── Phase 3: Verify correct image is running ──────────────
+            echo "=== Verifying correct Docker image ==="
+            RUNNING_IMAGE=$(sudo docker inspect enclave --format '{{.Config.Image}}' 2>/dev/null || echo "NONE")
+            echo "Expected: $IMAGE"
+            echo "Running:  $RUNNING_IMAGE"
+
+            if [ "$RUNNING_IMAGE" != "$IMAGE" ]; then
+                echo "::error::Wrong image running! Expected $IMAGE but got $RUNNING_IMAGE"
+                echo "Attempting forced restart..."
+                sudo systemctl stop enclave || true
+                sudo docker stop enclave 2>/dev/null || true
+                sudo docker rm enclave 2>/dev/null || true
+                sleep 2
+                sudo systemctl start enclave
+                sleep 15
+
+                RUNNING_IMAGE=$(sudo docker inspect enclave --format '{{.Config.Image}}' 2>/dev/null || echo "NONE")
+                if [ "$RUNNING_IMAGE" != "$IMAGE" ]; then
+                    echo "::error::Still wrong image after retry: $RUNNING_IMAGE"
+                    sudo journalctl -u enclave --no-pager -n 50
+                    exit 1
+                fi
+                echo "Correct image running after retry"
+            else
+                echo "✓ Correct image running"
+            fi
+
             echo "=== Verifying enclave health ==="
             for i in 1 2 3 4 5; do
                 if curl -sf --max-time 10 -k https://127.0.0.1:8080/health; then
@@ -196,41 +257,41 @@ jobs:
                 echo "Waiting for enclave... (attempt $i/5)"
                 sleep 10
             done
-            
+
             curl -sf --max-time 10 -k https://127.0.0.1:8080/health || {
                 echo "Enclave health check failed!"
                 sudo journalctl -u enclave --no-pager -n 50
                 exit 1
             }
-            
+
             echo ""
             echo "=== Restarting AVS (to load new measurements) ==="
             sudo systemctl restart avs
             sleep 10
-            
+
             curl -sf --max-time 10 http://127.0.0.1:9100/health || {
                 echo "AVS health check failed!"
                 sudo journalctl -u avs --no-pager -n 50
                 exit 1
             }
-            
+
             echo ""
             echo "=== Testing attestation ==="
             ATTEST=$(curl -s --max-time 30 -X POST http://127.0.0.1:9100/v1/attest \
                 -H 'Content-Type: application/json' \
                 -d '{"enclave_url":"https://127.0.0.1:8080","user_id":"cd-test","role":"user"}')
-            
+
             if echo "$ATTEST" | grep -q '"token"'; then
                 echo "✅ Attestation successful!"
             else
                 echo "❌ Attestation failed: $ATTEST"
                 exit 1
             fi
-            
+
             echo ""
             echo "=== Cleaning up old images ==="
             sudo docker image prune -f
-            
+
             echo ""
             echo "=============================================="
             echo "  Deployment Complete!"

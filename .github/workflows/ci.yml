@@ -127,27 +127,49 @@ jobs:
       - name: Install systemd (for systemd-analyze)
         run: sudo apt-get update && sudo apt-get install -y systemd
 
-      - name: Validate systemd service file
+      - name: Validate systemd unit files
         run: |
-          echo "Validating scripts/enclave.service..."
-          # Basic syntax check
-          systemd-analyze verify scripts/enclave.service || echo "Warning: systemd-analyze may report issues due to missing runtime dependencies"
-          
-          # Check for required sections
-          if ! grep -q '\[Unit\]' scripts/enclave.service; then
-            echo "ERROR: Missing [Unit] section"
+          validate_unit() {
+            local file=$1
+            echo "Validating $file..."
+            systemd-analyze verify "$file" || echo "Warning: systemd-analyze may report issues due to missing runtime dependencies"
+            for section in '[Unit]' '[Service]' '[Install]' '[Timer]'; do
+              # [Service] and [Timer] are type-specific; only check relevant ones
+              case "$section" in
+                '[Service]') grep -q '\[Service\]' "$file" 2>/dev/null || true ;;
+                '[Timer]')   grep -q '\[Timer\]'   "$file" 2>/dev/null || true ;;
+                *)
+                  if ! grep -q "$section" "$file"; then
+                    echo "ERROR: Missing $section in $file"
+                    exit 1
+                  fi
+                  ;;
+              esac
+            done
+            echo "✓ $file passed"
+          }
+
+          validate_unit scripts/enclave.service
+          validate_unit scripts/health-check.service
+          validate_unit scripts/health-check.timer
+
+      - name: Validate health-check script
+        run: |
+          echo "Checking scripts/health-check.sh..."
+          # Verify shebang
+          head -1 scripts/health-check.sh | grep -q '^#!/bin/bash' || {
+            echo "ERROR: Missing bash shebang"
             exit 1
-          fi
-          if ! grep -q '\[Service\]' scripts/enclave.service; then
-            echo "ERROR: Missing [Service] section"
+          }
+          # Syntax check
+          bash -n scripts/health-check.sh
+          echo "✓ health-check.sh syntax valid"
+          # Verify deploy-lock support
+          grep -q '.deploying' scripts/health-check.sh || {
+            echo "ERROR: health-check.sh missing deploy-lock support"
             exit 1
-          fi
-          if ! grep -q '\[Install\]' scripts/enclave.service; then
-            echo "ERROR: Missing [Install] section"
-            exit 1
-          fi
-          
-          echo "✓ Systemd service file validation passed"
+          }
+          echo "✓ deploy-lock support present"
 
       - name: Lint Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
