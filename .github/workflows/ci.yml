@@ -135,6 +135,46 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN }}
 
+      - name: Prepare signing key
+        env:
+          ENCLAVE_SIGNING_KEY: ${{ secrets.ENCLAVE_SIGNING_KEY }}
+        run: |
+          umask 077
+          printenv ENCLAVE_SIGNING_KEY > "$RUNNER_TEMP/enclave-key.pem"
+
+      - name: Validate signing key
+        run: |
+          KEY="$RUNNER_TEMP/enclave-key.pem"
+
+          # Must be a valid PEM private key
+          if ! openssl pkey -in "$KEY" -noout 2>/dev/null; then
+            echo "::error::Signing key is not a valid PEM private key"
+            exit 1
+          fi
+
+          # Must be RSA (SGX requires RSA for SIGSTRUCT)
+          KEY_TYPE=$(openssl pkey -in "$KEY" -noout -text 2>/dev/null | head -1)
+          if [[ "$KEY_TYPE" != *"RSA"* ]]; then
+            echo "::error::Signing key must be RSA, got: $KEY_TYPE"
+            exit 1
+          fi
+
+          # Must be 3072-bit (SGX requirement)
+          BIT_LEN=$(openssl rsa -in "$KEY" -noout -text 2>/dev/null | grep -oP '(?<=Private-Key: \()\d+')
+          if [[ "$BIT_LEN" != "3072" ]]; then
+            echo "::error::Signing key must be 3072-bit RSA, got: ${BIT_LEN}-bit"
+            exit 1
+          fi
+
+          # Must have public exponent 3 (SGX requirement)
+          EXPONENT=$(openssl rsa -in "$KEY" -noout -text 2>/dev/null | grep publicExponent | grep -oP '\d+(?= \()')
+          if [[ "$EXPONENT" != "3" ]]; then
+            echo "::error::Signing key must have exponent 3, got: $EXPONENT"
+            exit 1
+          fi
+
+          echo "✓ Valid 3072-bit RSA key with exponent 3"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -147,10 +187,14 @@ jobs:
             ${{ github.ref == 'refs/heads/main' && 'ghcr.io/relational-network/relational-sdk:latest' || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          secrets: |
-            signing_key=${{ secrets.ENCLAVE_SIGNING_KEY }}
+          secret-files: |
+            signing_key=${{ runner.temp }}/enclave-key.pem
           build-args: |
             SGX_DEBUG=0
+
+      - name: Shred signing key
+        if: always()
+        run: shred -u "$RUNNER_TEMP/enclave-key.pem" 2>/dev/null || true
 
       - name: Print measurements to job summary
         if: github.event_name == 'push'
