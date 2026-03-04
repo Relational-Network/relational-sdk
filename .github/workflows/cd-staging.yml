@@ -1,6 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Relational Network
 
+# CD - Staging
+#
+# Pulls the pre-built, pre-signed Docker image from GHCR (produced by CI)
+# and deploys it to the staging VM. No building or signing happens here —
+# the staging VM only needs Docker and SGX hardware to run the enclave.
+#
+# Flow:
+#   1. Verify staging VM is reachable via SSH
+#   2. Pull sha-<commit> image from GHCR
+#   3. Extract measurements, validate MRSIGNER hasn't changed, update .env
+#   4. Restart enclave + AVS services and verify health
+#   5. Run smoke tests against the public endpoint
+
 name: CD - Staging
 
 on:
@@ -48,106 +61,82 @@ jobs:
           exit 1
 
   build-and-deploy:
-    name: Build and Deploy on Staging
+    name: Deploy Pre-Built Image to Staging
     runs-on: ubuntu-latest
     needs: check-staging-online
     if: needs.check-staging-online.outputs.online == 'true'
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        env:
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/enclave.service
+
+      - name: Copy service file to staging VM
+        uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
-          command_timeout: 30m
-          envs: GHCR_TOKEN
+          source: scripts/enclave.service
+          target: /tmp/
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          COMMIT_SHA: ${{ github.sha }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          command_timeout: 15m
+          envs: GHCR_TOKEN,COMMIT_SHA
           script: |
             set -e
-            
+
             echo "=============================================="
-            echo "  relational-sdk CD - Building on Staging"
+            echo "  relational-sdk CD - Deploying Pre-Built Image"
             echo "=============================================="
-            
+
             # Configuration
-            SDK_DIR="/opt/relational-sdk"
             ENV_FILE="/opt/iob-micres/.env"
-            SIGNING_KEY="/opt/iob-micres/secrets/enclave-key.pem"
-            IMAGE_NAME="ghcr.io/relational-network/relational-sdk"
-            IMAGE_TAG="staging-latest"
-            
+            IMAGE="ghcr.io/relational-network/relational-sdk:sha-${COMMIT_SHA}"
+
             # Verify SGX hardware
             if [ ! -e /dev/sgx/enclave ]; then
                 echo "ERROR: SGX device not found"
                 exit 1
             fi
-            
-            # Verify signing key
-            if [ ! -f "$SIGNING_KEY" ]; then
-                echo "ERROR: Signing key not found at $SIGNING_KEY"
-                exit 1
-            fi
-            
-            # Clone or pull latest code
-            if [ ! -d "$SDK_DIR" ]; then
-                echo "=== Cloning repository ==="
-                sudo git clone https://github.com/Relational-Network/relational-sdk.git "$SDK_DIR"
-                sudo chown -R $USER:$USER "$SDK_DIR"
-            fi
-            
-            cd "$SDK_DIR"
-            
-            echo "=== Fetching latest code ==="
-            git fetch origin
-            git checkout staging
-            git reset --hard origin/staging
-            
+
             echo "=== Stopping current enclave ==="
             sudo systemctl stop enclave || true
             sudo docker stop enclave 2>/dev/null || true
             sudo docker rm enclave 2>/dev/null || true
-            
-            echo "=== Building Docker image ==="
-            sudo docker build \
-                -t ${IMAGE_NAME}:${IMAGE_TAG} \
-                -f docker/Dockerfile \
-                .
-            
-            echo "=== Logging into GHCR ==="
+
+            echo "=== Pulling pre-built image ==="
             echo "$GHCR_TOKEN" | sudo docker login ghcr.io -u relational-network --password-stdin
-            
-            echo "=== Pushing to GHCR ==="
-            sudo docker push ${IMAGE_NAME}:${IMAGE_TAG}
-            
-            echo "=== Extracting measurements ==="
-            # Run container briefly to sign and extract measurements
-            # Note: Must pass --key explicitly since GRAMINE_SGX_SIGNING_KEY env var
-            # is only used by gramine-sgx at runtime, not by gramine-sgx-sign
+            sudo docker pull "$IMAGE"
+
+            echo "=== Extracting measurements from pre-built image ==="
             sudo docker run --rm \
-                --device /dev/sgx/enclave \
-                --device /dev/sgx/provision \
-                -v ${SIGNING_KEY}:/keys/enclave-key.pem:ro \
-                --entrypoint /bin/bash \
-                ${IMAGE_NAME}:${IMAGE_TAG} \
-                -c "cd /app && gramine-sgx-sign --key /keys/enclave-key.pem --manifest relational-sdk.manifest --output relational-sdk.manifest.sgx && gramine-sgx-sigstruct-view relational-sdk.sig" \
-                > /tmp/measurements.txt 2>&1
-            
-            if [ $? -ne 0 ]; then
-                echo "ERROR: Failed to extract measurements!"
-                cat /tmp/measurements.txt
-                exit 1
-            fi
-            
+                --entrypoint gramine-sgx-sigstruct-view \
+                "$IMAGE" /app/relational-sdk.sig > /tmp/measurements.txt
+
             cat /tmp/measurements.txt
-            
+
             MRENCLAVE=$(grep "mr_enclave:" /tmp/measurements.txt | awk '{print $2}' | head -1)
-            MRSIGNER=$(grep "mr_signer:" /tmp/measurements.txt | awk '{print $2}' | head -1)
-            
+            MRSIGNER=$(grep "mr_signer:"  /tmp/measurements.txt | awk '{print $2}' | head -1)
+
             echo ""
             echo "MRENCLAVE: $MRENCLAVE"
             echo "MRSIGNER:  $MRSIGNER"
-            
+
+            # Write image tag so enclave.service knows which image to run
+            if grep -q "^ENCLAVE_IMAGE_TAG=" "$ENV_FILE"; then
+                sudo sed -i "s/^ENCLAVE_IMAGE_TAG=.*/ENCLAVE_IMAGE_TAG=sha-${COMMIT_SHA}/" "$ENV_FILE"
+            else
+                echo "ENCLAVE_IMAGE_TAG=sha-${COMMIT_SHA}" | sudo tee -a "$ENV_FILE"
+            fi
+
             # Validate MRSIGNER hasn't changed (indicates signing key mismatch)
             if [ -f "$ENV_FILE" ]; then
                 EXISTING_MRSIGNER=$(grep "^AVS_EXPECTED_MRSIGNER=" "$ENV_FILE" | cut -d= -f2)
@@ -168,11 +157,18 @@ jobs:
                 fi
             fi
             
-            echo "=== Deploying service file ==="
-            sudo cp /opt/relational-sdk/scripts/enclave.service /etc/systemd/system/enclave.service
-            sudo systemctl daemon-reload
+            echo "=== Updating enclave.service if changed ==="
+            if ! diff -q /tmp/scripts/enclave.service /etc/systemd/system/enclave.service > /dev/null 2>&1; then
+                echo "enclave.service changed, installing updated version"
+                sudo cp /tmp/scripts/enclave.service /etc/systemd/system/enclave.service
+                sudo chmod 644 /etc/systemd/system/enclave.service
+            else
+                echo "enclave.service unchanged"
+            fi
+            rm -f /tmp/scripts/enclave.service
 
-            echo "=== Starting enclave service ==="
+            echo "=== Reloading and starting enclave service ==="
+            sudo systemctl daemon-reload
             sudo systemctl start enclave
             sleep 15
             
@@ -227,7 +223,7 @@ jobs:
             echo "=============================================="
             echo "MRENCLAVE: $MRENCLAVE"
             echo "MRSIGNER:  $MRSIGNER"
-            echo "Image:     ${IMAGE_NAME}:${IMAGE_TAG}"
+            echo "Image:     ${IMAGE}"
 
   verify-public:
     name: Verify Public Endpoint
