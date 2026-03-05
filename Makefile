@@ -97,11 +97,13 @@ docker-build:
 
 .PHONY: docker-run
 docker-run:
+	@mkdir -p $(abspath data)
 	sudo docker run --rm -it \
 		--name relational-sdk-sgx \
 		--network host \
 		--device /dev/sgx/enclave \
 		--device /dev/sgx/provision \
+		-v "$(abspath data):/app/data" \
 		-v "$(abspath $(SECRETS_DIR)/avs-tls.crt):/etc/ssl/certs/avs-ca.crt:ro" \
 		-e SECRET_PROVISION_SERVERS=127.0.0.1:4433 \
 		relationalnetwork/relational-sdk:focal

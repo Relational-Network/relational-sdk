@@ -416,5 +416,9 @@ pub fn verify_cursor(token: &str) -> Option<String> {
     let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC can take any key size");
     mac.update(raw.as_bytes());
     let expected = hex::encode(mac.finalize().into_bytes());
-    if expected == tag { Some(raw) } else { None }
+    if expected == tag {
+        Some(raw)
+    } else {
+        None
+    }
 }

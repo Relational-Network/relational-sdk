@@ -117,8 +117,7 @@ pub struct JwksCache {
 pub async fn fetch_jwks(url: &str) -> Result<Vec<(String, DecodingKey)>, String> {
     // Build HTTP client — use AVS_CA_CERT_PATH as trusted root when set,
     // otherwise use system default CA bundle (no blanket cert bypass).
-    let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10));
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10));
 
     if let Ok(ca_path) = std::env::var("AVS_CA_CERT_PATH") {
         let pem = std::fs::read(&ca_path)
@@ -247,10 +246,14 @@ pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenData, 
     // Prevents token-swap attacks where a legitimate AVS token issued for a
     // different enclave instance is replayed against this one.
     // This claim is MANDATORY — tokens without it are rejected.
-    let token_key = token_data.claims.enclave_public_key.as_ref().ok_or_else(|| {
-        warn!(sub = %token_data.claims.sub, "Token missing enclave_public_key claim");
-        "token missing required enclave_public_key claim".to_string()
-    })?;
+    let token_key = token_data
+        .claims
+        .enclave_public_key
+        .as_ref()
+        .ok_or_else(|| {
+            warn!(sub = %token_data.claims.sub, "Token missing enclave_public_key claim");
+            "token missing required enclave_public_key claim".to_string()
+        })?;
     {
         let actual = enclave_key().public_jwk();
         let key_matches = token_key.x.as_deref() == actual.x.as_deref()

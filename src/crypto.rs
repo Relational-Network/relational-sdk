@@ -168,11 +168,7 @@ pub fn decode_base64_any(input: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(input)
         .ok()
-        .or_else(|| {
-            base64::engine::general_purpose::STANDARD
-                .decode(input)
-                .ok()
-        })
+        .or_else(|| base64::engine::general_purpose::STANDARD.decode(input).ok())
         .or_else(|| {
             base64::engine::general_purpose::STANDARD_NO_PAD
                 .decode(input)

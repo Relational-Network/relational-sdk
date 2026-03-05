@@ -31,12 +31,16 @@ fn system_program_id() -> Pubkey {
 
 fn token_2022_program_id() -> Pubkey {
     static ID: OnceLock<Pubkey> = OnceLock::new();
-    *ID.get_or_init(|| Pubkey::from_str(TOKEN_2022_PROGRAM_ID_STR).expect("valid Token-2022 program ID"))
+    *ID.get_or_init(|| {
+        Pubkey::from_str(TOKEN_2022_PROGRAM_ID_STR).expect("valid Token-2022 program ID")
+    })
 }
 
 fn associated_token_program_id() -> Pubkey {
     static ID: OnceLock<Pubkey> = OnceLock::new();
-    *ID.get_or_init(|| Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID_STR).expect("valid ATA program ID"))
+    *ID.get_or_init(|| {
+        Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID_STR).expect("valid ATA program ID")
+    })
 }
 
 /// Build a `ComputeBudgetProgram::SetComputeUnitLimit` instruction.

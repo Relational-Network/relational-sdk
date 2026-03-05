@@ -433,6 +433,6 @@ mod tests {
         assert!(result
             .errors
             .iter()
-            .any(|e| e.field == "awardBoardDate" && e.message.contains("day 1-31")));
+            .any(|e| e.field == "awardBoardDate" && e.message.contains("Invalid calendar date")));
     }
 }

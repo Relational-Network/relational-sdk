@@ -472,13 +472,12 @@ async fn parse_csv_payload(multipart: Multipart) -> Result<ParsedCsvPayload, Api
     let ephemeral_key = input.ephemeral_public_key.ok_or_else(|| {
         ApiError::bad_request("ephemeral_public_key is required for encrypted uploads")
     })?;
-    let nonce = input.nonce.ok_or_else(|| {
-        ApiError::bad_request("nonce is required for encrypted uploads")
-    })?;
+    let nonce = input
+        .nonce
+        .ok_or_else(|| ApiError::bad_request("nonce is required for encrypted uploads"))?;
 
-    let csv_bytes =
-        crate::crypto::decrypt_ecdh_payload(&encrypted_data, &ephemeral_key, &nonce)
-            .map_err(ApiError::bad_request)?;
+    let csv_bytes = crate::crypto::decrypt_ecdh_payload(&encrypted_data, &ephemeral_key, &nonce)
+        .map_err(ApiError::bad_request)?;
 
     ensure_size_limit(&csv_bytes)?;
 
@@ -569,5 +568,3 @@ fn is_safe_identifier(value: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
-
-

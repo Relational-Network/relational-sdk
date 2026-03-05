@@ -15,7 +15,10 @@ pub fn keypair_from_bytes(bytes: &[u8]) -> Result<Keypair, ApiError> {
 /// Reconstruct a keypair and verify it matches the expected public address.
 ///
 /// Prevents silently signing with a swapped/corrupted key file.
-pub fn keypair_from_bytes_verified(bytes: &[u8], expected_address: &str) -> Result<Keypair, ApiError> {
+pub fn keypair_from_bytes_verified(
+    bytes: &[u8],
+    expected_address: &str,
+) -> Result<Keypair, ApiError> {
     let kp = keypair_from_bytes(bytes)?;
     let derived = kp.pubkey().to_string();
     if derived != expected_address {
@@ -25,7 +28,7 @@ pub fn keypair_from_bytes_verified(bytes: &[u8], expected_address: &str) -> Resu
             "Keypair public key mismatch — stored keypair does not match wallet address"
         );
         return Err(ApiError::internal(
-            "keypair integrity check failed: derived public key does not match wallet address"
+            "keypair integrity check failed: derived public key does not match wallet address",
         ));
     }
     Ok(kp)

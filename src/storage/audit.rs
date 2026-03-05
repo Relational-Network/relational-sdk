@@ -65,8 +65,7 @@ fn audit_hmac_key() -> [u8; 32] {
 /// Compute HMAC-SHA256 of a canonical JSON blob.
 fn compute_hmac(json_bytes: &[u8]) -> String {
     let key = audit_hmac_key();
-    let mut mac =
-        HmacSha256::new_from_slice(&key).expect("HMAC can take key of any size");
+    let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC can take key of any size");
     mac.update(json_bytes);
     hex::encode(mac.finalize().into_bytes())
 }
@@ -103,7 +102,6 @@ impl AuditEvent {
         self.resource_id = Some(resource_id.into());
         self
     }
-
 }
 
 /// Writes [`AuditEvent`]s to daily JSONL files.

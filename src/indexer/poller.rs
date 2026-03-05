@@ -156,17 +156,25 @@ async fn poll_address(
                 let now = Utc::now();
 
                 // Extract fee payer (first account key) to determine direction.
-                let fee_payer = extract_fee_payer(&tx_detail.transaction.transaction)
-                    .unwrap_or_default();
+                let fee_payer =
+                    extract_fee_payer(&tx_detail.transaction.transaction).unwrap_or_default();
                 let is_sender = fee_payer == address;
 
                 let stored = StoredTransaction {
                     signature: sig_str.clone(),
                     wallet_id: wallet_id.to_string(),
                     counterparty_wallet_id: None,
-                    from: if is_sender { address.to_string() } else { fee_payer },
-                    to: if is_sender { String::new() } else { address.to_string() },
-                    amount: "0".to_string(),   // parsed below if available
+                    from: if is_sender {
+                        address.to_string()
+                    } else {
+                        fee_payer
+                    },
+                    to: if is_sender {
+                        String::new()
+                    } else {
+                        address.to_string()
+                    },
+                    amount: "0".to_string(), // parsed below if available
                     token: TokenType::Native,
                     network: solana.network().name.to_string(),
                     status,
@@ -181,11 +189,7 @@ async fn poll_address(
                 };
 
                 // Determine direction: if this address is the fee payer, it's "sent".
-                let direction = if is_sender {
-                    "sent"
-                } else {
-                    "received"
-                };
+                let direction = if is_sender { "sent" } else { "received" };
                 let directions = vec![(address.to_string(), direction)];
 
                 if let Err(e) = tx_db.upsert_transaction(&stored, &directions) {
