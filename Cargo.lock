@@ -2788,6 +2788,7 @@ dependencies = [
  "csv",
  "hex",
  "hkdf",
+ "hmac",
  "jsonwebtoken",
  "lru",
  "p256",

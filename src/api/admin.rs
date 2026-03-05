@@ -198,8 +198,12 @@ pub async fn query_audit_logs(
         .date
         .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
 
+    // Validate date format (YYYY-MM-DD) to prevent filesystem scanning with invalid paths.
+    chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request("date must be in YYYY-MM-DD format"))?;
+
     let audit = AuditRepository::new(&state.storage);
-    let events = audit.read_events(&date);
+    let events = audit.read_verified_events(&date);
     let count = events.len();
 
     Ok(Json(AuditEventsResponse { events, count }))

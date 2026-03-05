@@ -58,6 +58,20 @@ impl EnclaveKey {
     pub fn public_jwk(&self) -> &Jwk {
         &self.public_jwk
     }
+
+    /// Derive a purpose-bound HMAC key from the enclave's **private** scalar.
+    ///
+    /// Uses HKDF-SHA256 with a domain separator so the raw secret never
+    /// leaks beyond this derivation.  The result is suitable for audit
+    /// integrity tags, pagination cursor signing, etc.
+    pub fn hmac_key(&self, domain: &[u8]) -> [u8; 32] {
+        let scalar_bytes = self.private_key.to_bytes();
+        let hk = Hkdf::<Sha256>::new(Some(domain), scalar_bytes.as_slice());
+        let mut key = [0u8; 32];
+        hk.expand(b"relational-sdk:hmac:v1", &mut key)
+            .expect("32 bytes is a valid HMAC key length");
+        key
+    }
 }
 
 /// Generate or return the enclave keypair for encrypting uploads.
@@ -146,17 +160,21 @@ pub fn jwk_for_public_key(public_key: &p256::PublicKey) -> Jwk {
     }
 }
 
-fn decode_base64_any(input: &str) -> Option<Vec<u8>> {
-    base64::engine::general_purpose::STANDARD
+/// Decode base64 with multiple variant fallback.
+///
+/// Tries URL_SAFE_NO_PAD first (our canonical encoding), then falls back to
+/// STANDARD, STANDARD_NO_PAD, and URL_SAFE for interop.
+pub fn decode_base64_any(input: &str) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(input)
         .ok()
         .or_else(|| {
-            base64::engine::general_purpose::STANDARD_NO_PAD
+            base64::engine::general_purpose::STANDARD
                 .decode(input)
                 .ok()
         })
         .or_else(|| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
+            base64::engine::general_purpose::STANDARD_NO_PAD
                 .decode(input)
                 .ok()
         })

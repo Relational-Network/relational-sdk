@@ -19,8 +19,8 @@ dev = []  # Enables dev-mode logging
 axum = { version = "0.8.8", features = ["multipart"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "request-id", "trace"] }
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
+tower-http = { version = "0.6", features = ["request-id", "set-header", "trace"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # ── Serialization ──────────────────────────────────────────────────
@@ -39,6 +39,7 @@ rustls = { version = "0.23.36", default-features = false, features = ["ring"] }
 jsonwebtoken = { version = "10.3.0", default-features = false, features = ["use_pem", "p256", "aws_lc_rs"] }
 p256 = { version = "0.13.2", features = ["pkcs8", "ecdh"] }
 sha2 = "0.10.9"
+hmac = "0.12"
 base64 = "0.22.1"
 hkdf = "0.12.4"
 aes-gcm = "0.10.3"

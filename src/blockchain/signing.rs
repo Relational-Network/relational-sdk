@@ -12,6 +12,25 @@ pub fn keypair_from_bytes(bytes: &[u8]) -> Result<Keypair, ApiError> {
     Keypair::try_from(bytes).map_err(|e| ApiError::internal(format!("invalid keypair data: {e}")))
 }
 
+/// Reconstruct a keypair and verify it matches the expected public address.
+///
+/// Prevents silently signing with a swapped/corrupted key file.
+pub fn keypair_from_bytes_verified(bytes: &[u8], expected_address: &str) -> Result<Keypair, ApiError> {
+    let kp = keypair_from_bytes(bytes)?;
+    let derived = kp.pubkey().to_string();
+    if derived != expected_address {
+        tracing::error!(
+            derived_pubkey = %derived,
+            expected = %expected_address,
+            "Keypair public key mismatch — stored keypair does not match wallet address"
+        );
+        return Err(ApiError::internal(
+            "keypair integrity check failed: derived public key does not match wallet address"
+        ));
+    }
+    Ok(kp)
+}
+
 /// Generate a new random Ed25519 keypair for Solana.
 ///
 /// Returns `(keypair_bytes, base58_public_address)`.

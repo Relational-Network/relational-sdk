@@ -37,9 +37,14 @@ impl TxCache {
     }
 
     /// Get the cached first page for a wallet address.
-    #[allow(dead_code)]
     pub fn get_first_page(&self, wallet_address: &str) -> Option<Vec<(StoredTransaction, String)>> {
-        let mut cache = self.cache.lock().ok()?;
+        let mut cache = match self.cache.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "TxCache mutex poisoned in get_first_page");
+                return None;
+            }
+        };
         let entry = cache.get(wallet_address)?;
         if entry.inserted_at.elapsed() > self.ttl {
             cache.pop(wallet_address);
@@ -49,23 +54,32 @@ impl TxCache {
     }
 
     /// Cache the first page for a wallet address.
-    #[allow(dead_code)]
     pub fn put_first_page(&self, wallet_address: &str, txs: Vec<(StoredTransaction, String)>) {
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.put(
-                wallet_address.to_string(),
-                CacheEntry {
-                    txs,
-                    inserted_at: Instant::now(),
-                },
-            );
+        match self.cache.lock() {
+            Ok(mut cache) => {
+                cache.put(
+                    wallet_address.to_string(),
+                    CacheEntry {
+                        txs,
+                        inserted_at: Instant::now(),
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "TxCache mutex poisoned in put_first_page");
+            }
         }
     }
 
     /// Invalidate cached data for a wallet address (called by the indexer).
     pub fn invalidate(&self, wallet_address: &str) {
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.pop(wallet_address);
+        match self.cache.lock() {
+            Ok(mut cache) => {
+                cache.pop(wallet_address);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "TxCache mutex poisoned in invalidate");
+            }
         }
     }
 }

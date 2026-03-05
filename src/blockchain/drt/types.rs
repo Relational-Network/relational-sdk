@@ -18,8 +18,8 @@ use utoipa::ToSchema;
 // ============================================================================
 
 /// Deployed program ID on Solana (devnet and mainnet).
-/// Canonical source: [`crate::config::DRT_PROGRAM_ID_STR`].
-#[allow(unused_imports)] // re-exported for glob consumers (`use types::*`)
+/// Canonical source: [`crate::config::DRT_PROGRAM_ID_STR`] / [`crate::config::drt_program_id()`].
+#[allow(unused_imports)]
 pub use crate::config::DRT_PROGRAM_ID_STR;
 
 /// Token-2022 program.
@@ -34,25 +34,25 @@ pub const SYSTEM_PROGRAM_ID_STR: &str = "11111111111111111111111111111111";
 /// The DRT type string for append-type DRTs.
 pub const APPEND_DRT_TYPE: &str = "append";
 
-// ── Instruction discriminators ──────────────────────────────────────
+// ── Instruction discriminators (auto-generated from IDL) ────────
 
-pub const DISC_CREATE_POOL_ATOMIC: [u8; 8] = [111, 115, 11, 248, 238, 190, 197, 135];
-pub const DISC_BUY_DRT: [u8; 8] = [218, 223, 158, 106, 131, 8, 185, 169];
-pub const DISC_REDEEM_DRT: [u8; 8] = [79, 17, 209, 207, 80, 225, 246, 145];
-pub const DISC_CLOSE_POOL: [u8; 8] = [140, 189, 209, 23, 239, 62, 239, 11];
+pub use super::idl_generated::DISC_BUY_DRT;
+pub use super::idl_generated::DISC_CLOSE_POOL;
+pub use super::idl_generated::DISC_CREATE_POOL_ATOMIC;
+pub use super::idl_generated::DISC_REDEEM_DRT;
 
-// ── Account discriminators ──────────────────────────────────────────
+// ── Account discriminators (auto-generated from IDL) ────────────
 
-pub const DISC_POOL_ACCOUNT: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
+pub use super::idl_generated::DISC_POOL_ACCOUNT;
 
-// ── Event discriminators ────────────────────────────────────────────
+// ── Event discriminators (auto-generated from IDL) ──────────────
 
-pub const DISC_POOL_CREATED: [u8; 8] = [202, 44, 41, 88, 104, 220, 157, 82];
-pub const DISC_DRT_INITIALIZED: [u8; 8] = [151, 135, 79, 83, 56, 230, 190, 206];
-pub const DISC_DRT_PURCHASED: [u8; 8] = [116, 59, 17, 172, 205, 194, 249, 108];
-pub const DISC_DRT_REDEEMED: [u8; 8] = [91, 80, 227, 141, 229, 217, 44, 23];
-pub const DISC_APPEND_REDEEMED: [u8; 8] = [23, 103, 73, 233, 18, 83, 30, 232];
-pub const DISC_POOL_CLOSED: [u8; 8] = [106, 46, 29, 231, 42, 44, 73, 119];
+pub use super::idl_generated::DISC_APPEND_REDEEMED;
+pub use super::idl_generated::DISC_DRT_INITIALIZED;
+pub use super::idl_generated::DISC_DRT_PURCHASED;
+pub use super::idl_generated::DISC_DRT_REDEEMED;
+pub use super::idl_generated::DISC_POOL_CLOSED;
+pub use super::idl_generated::DISC_POOL_CREATED;
 
 // ── Validation limits ───────────────────────────────────────────────
 

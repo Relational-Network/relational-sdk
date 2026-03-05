@@ -51,8 +51,6 @@ loader.env.SECRET_PROVISION_CA_CHAIN_PATH = "/etc/ssl/certs/avs-ca.crt"
 
 # AVS URL for JWT validation (passthrough from container env)
 loader.env.AVS_JWKS_URL = { passthrough = true }
-loader.env.SOLANA_RPC_URL = { passthrough = true }
-loader.env.SOLANA_NETWORK = { passthrough = true }
 
 # See https://gramine.readthedocs.io/en/stable/performance.html#glibc-malloc-tuning
 loader.env.MALLOC_ARENA_MAX = "1"

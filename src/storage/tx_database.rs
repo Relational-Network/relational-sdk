@@ -20,6 +20,8 @@ const TRANSACTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("transac
 const WALLET_TX_INDEX: TableDefinition<&[u8], &str> = TableDefinition::new("wallet_tx_index");
 const ADDRESS_WALLET_MAP: TableDefinition<&str, &str> = TableDefinition::new("address_wallet_map");
 const INDEXER_STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("indexer_state");
+/// Nonce replay protection: nonce_string → unix_timestamp (i64 LE bytes).
+const NONCES: TableDefinition<&str, &[u8]> = TableDefinition::new("nonces");
 
 /// Result alias for tx database operations.
 pub type TxDbResult<T> = Result<T, TxDbError>;
@@ -34,6 +36,8 @@ pub enum TxDbError {
     TransactionError(redb::TransactionError),
     CommitError(redb::CommitError),
     Json(serde_json::Error),
+    /// Client provided a tampered or invalid pagination cursor.
+    InvalidCursor,
 }
 
 impl std::fmt::Display for TxDbError {
@@ -46,6 +50,7 @@ impl std::fmt::Display for TxDbError {
             Self::TransactionError(e) => write!(f, "transaction: {e}"),
             Self::CommitError(e) => write!(f, "commit: {e}"),
             Self::Json(e) => write!(f, "json: {e}"),
+            Self::InvalidCursor => write!(f, "invalid pagination cursor"),
         }
     }
 }
@@ -90,8 +95,13 @@ impl From<serde_json::Error> for TxDbError {
 
 impl From<TxDbError> for crate::error::ApiError {
     fn from(e: TxDbError) -> Self {
-        tracing::error!(error = %e, "Transaction database error");
-        Self::internal("internal database error")
+        match &e {
+            TxDbError::InvalidCursor => Self::bad_request("invalid pagination cursor"),
+            _ => {
+                tracing::error!(error = %e, "Transaction database error");
+                Self::internal("internal database error")
+            }
+        }
     }
 }
 
@@ -112,10 +122,18 @@ impl TxDatabase {
             let _ = write_txn.open_table(WALLET_TX_INDEX)?;
             let _ = write_txn.open_table(ADDRESS_WALLET_MAP)?;
             let _ = write_txn.open_table(INDEXER_STATE)?;
+            let _ = write_txn.open_table(NONCES)?;
         }
         write_txn.commit()?;
 
         Ok(Self { db })
+    }
+
+    /// Start a read transaction.  Used by the readiness probe to verify
+    /// the database file is intact and readable.
+    pub fn begin_read_txn(&self) -> TxDbResult<()> {
+        let _txn = self.db.begin_read()?;
+        Ok(())
     }
 
     /// Insert or update a transaction, with direction entries for each involved address.
@@ -174,9 +192,12 @@ impl TxDatabase {
 
         // Build start key from cursor or scan from the beginning of the address prefix.
         let prefix = format!("{address}|");
-        let start = cursor
-            .map(|c| c.as_bytes().to_vec())
-            .unwrap_or_else(|| prefix.as_bytes().to_vec());
+        let start = match cursor {
+            Some(c) => verify_cursor(c)
+                .ok_or(TxDbError::InvalidCursor)?
+                .into_bytes(),
+            None => prefix.as_bytes().to_vec(),
+        };
 
         let mut results = Vec::new();
         let mut next_cursor = None;
@@ -193,7 +214,7 @@ impl TxDatabase {
             }
 
             if results.len() >= limit {
-                next_cursor = Some(key_str.to_string());
+                next_cursor = Some(sign_cursor(key_str));
                 break;
             }
 
@@ -293,6 +314,55 @@ impl TxDatabase {
         write_txn.commit()?;
         Ok(())
     }
+
+    // ── Nonce replay protection ────────────────────────────────────
+
+    /// Record a nonce. Returns `true` if the nonce was **new** (inserted),
+    /// `false` if it was already present (replay detected).
+    pub fn record_nonce(&self, nonce: &str) -> TxDbResult<bool> {
+        let write_txn = self.db.begin_write()?;
+        let is_new = {
+            let mut table = write_txn.open_table(NONCES)?;
+            if table.get(nonce)?.is_some() {
+                false
+            } else {
+                let now = chrono::Utc::now().timestamp().to_le_bytes();
+                table.insert(nonce, now.as_slice())?;
+                true
+            }
+        };
+        write_txn.commit()?;
+        Ok(is_new)
+    }
+
+    /// Purge nonces older than `max_age_secs` to prevent unbounded growth.
+    pub fn purge_expired_nonces(&self, max_age_secs: i64) -> TxDbResult<usize> {
+        let cutoff = chrono::Utc::now().timestamp() - max_age_secs;
+        let write_txn = self.db.begin_write()?;
+        let mut removed = 0usize;
+        {
+            let mut table = write_txn.open_table(NONCES)?;
+            let mut to_remove = Vec::new();
+            {
+                let iter = table.iter()?;
+                for entry in iter {
+                    let entry = entry?;
+                    let nonce_key = entry.0.value().to_string();
+                    let ts_bytes: [u8; 8] = entry.1.value().try_into().unwrap_or([0u8; 8]);
+                    let ts = i64::from_le_bytes(ts_bytes);
+                    if ts < cutoff {
+                        to_remove.push(nonce_key);
+                    }
+                }
+            }
+            for key in &to_remove {
+                table.remove(key.as_str())?;
+                removed += 1;
+            }
+        }
+        write_txn.commit()?;
+        Ok(removed)
+    }
 }
 
 // ── Index key helpers ──────────────────────────────────────────────
@@ -309,4 +379,42 @@ fn make_index_key(address: &str, timestamp: i64, signature: &str) -> Vec<u8> {
     key.push(b'|');
     key.extend_from_slice(signature.as_bytes());
     key
+}
+
+// ── Signed pagination cursor helpers ───────────────────────────────
+
+use base64::Engine;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Derive an HMAC key specifically for cursor signing from the enclave's
+/// **private** scalar (not the public `kid`).
+fn cursor_hmac_key() -> [u8; 32] {
+    crate::crypto::enclave_key().hmac_key(b"cursor-hmac-v1")
+}
+
+/// Sign a raw cursor value, returning an opaque token: `base64url(raw).hmac_hex`.
+pub fn sign_cursor(raw: &str) -> String {
+    let key = cursor_hmac_key();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes());
+    let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC can take any key size");
+    mac.update(raw.as_bytes());
+    let tag = hex::encode(mac.finalize().into_bytes());
+    format!("{encoded}.{tag}")
+}
+
+/// Verify a signed cursor and return the raw cursor value, or `None` if forged.
+pub fn verify_cursor(token: &str) -> Option<String> {
+    let (encoded, tag) = token.rsplit_once('.')?;
+    let raw_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .ok()?;
+    let raw = String::from_utf8(raw_bytes).ok()?;
+    let key = cursor_hmac_key();
+    let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC can take any key size");
+    mac.update(raw.as_bytes());
+    let expected = hex::encode(mac.finalize().into_bytes());
+    if expected == tag { Some(raw) } else { None }
 }

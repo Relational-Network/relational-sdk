@@ -57,56 +57,20 @@ pub const MAX_BODY_SIZE: usize = 20 * 1024 * 1024;
 // Storage
 // ============================================================================
 
-/// Default encrypted data directory (Gramine mounts /data as encrypted FS).
-pub const DEFAULT_DATA_DIR: &str = "/data";
-
-/// Environment variable for optional data directory override.
-pub const DATA_DIR_ENV: &str = "DATA_DIR";
-
-/// Get the data directory path from environment or use default.
-pub fn data_dir() -> String {
-    env::var(DATA_DIR_ENV).unwrap_or_else(|_| DEFAULT_DATA_DIR.to_string())
-}
+/// Encrypted data directory (Gramine mounts /data as encrypted FS).
+/// Hardcoded — the manifest always mounts encrypted FS at /data.
+pub const DATA_DIR: &str = "/data";
 
 // ============================================================================
 // Solana
 // ============================================================================
 
-/// Default Solana RPC URL — devnet for development, override for mainnet.
-pub const DEFAULT_SOLANA_RPC_URL: &str = "https://api.devnet.solana.com";
+/// Solana RPC endpoint. Hardcoded to devnet.
+/// To switch to mainnet, change this constant and rebuild.
+pub const SOLANA_RPC_URL: &str = "https://api.devnet.solana.com";
 
-/// Default Solana network name.
-pub const DEFAULT_SOLANA_NETWORK: &str = "devnet";
-
-/// Get Solana RPC URL from environment or use default.
-pub fn solana_rpc_url() -> String {
-    env::var("SOLANA_RPC_URL").unwrap_or_else(|_| DEFAULT_SOLANA_RPC_URL.to_string())
-}
-
-/// Get Solana network name from environment or use default.
-pub fn solana_network() -> String {
-    env::var("SOLANA_NETWORK").unwrap_or_else(|_| DEFAULT_SOLANA_NETWORK.to_string())
-}
-
-// ============================================================================
-// CORS
-// ============================================================================
-
-/// Default CORS allowed origins (local dev).
-#[allow(dead_code)]
-pub const DEFAULT_CORS_ORIGINS: &str = "http://localhost:3000";
-
-/// Get CORS allowed origins as a `Vec<String>`.
-/// Set `CORS_ALLOWED_ORIGINS` env var to a comma-separated list for staging/prod.
-#[allow(dead_code)]
-pub fn cors_allowed_origins() -> Vec<String> {
-    env::var("CORS_ALLOWED_ORIGINS")
-        .unwrap_or_else(|_| DEFAULT_CORS_ORIGINS.to_string())
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
+/// Solana network name. Hardcoded to devnet.
+pub const SOLANA_NETWORK: &str = "devnet";
 
 // ============================================================================
 // Background Indexer
@@ -128,17 +92,37 @@ pub const TX_CACHE_CAPACITY: usize = 128;
 pub const TX_CACHE_TTL_SECS: u64 = 30;
 
 // ============================================================================
+// Nonce Replay Protection
+// ============================================================================
+
+/// Maximum age of a nonce entry in seconds before it is purged (24 hours).
+pub const NONCE_MAX_AGE_SECS: i64 = 86_400;
+
+/// How often the background nonce purge task runs (in seconds, every 15 min).
+pub const NONCE_PURGE_INTERVAL_SECS: u64 = 900;
+
+// ============================================================================
 // DRT Smart Contract
 // ============================================================================
 
-/// DRT program ID on Solana (devnet).
-/// Hardcoded — this program is immutable and deployed at the same address
-/// on all networks.
+/// DRT program ID on Solana (devnet). Hardcoded — change and rebuild to update.
 pub const DRT_PROGRAM_ID_STR: &str = "kG7AyfxRoNKcYWGH8aDR6tCFpLVcETt2kBVaPnQCrnp";
 
-/// Get the DRT program `Pubkey`.
+/// Get the DRT program `Pubkey` (parsed from the hardcoded constant).
 pub fn drt_program_id() -> solana_sdk::pubkey::Pubkey {
     use std::str::FromStr;
     solana_sdk::pubkey::Pubkey::from_str(DRT_PROGRAM_ID_STR)
-        .expect("invalid DRT_PROGRAM_ID_STR — this is a compile-time bug")
+        .expect("DRT_PROGRAM_ID_STR is a valid Solana pubkey")
 }
+
+// ============================================================================
+// JWKS Security
+// ============================================================================
+
+/// Whether plain HTTP is allowed for the JWKS URL.
+///
+/// Hardcoded to `true` because the enclave and the AVS are co-located on
+/// localhost. In production the Caddy proxy terminates TLS externally.
+/// If a future deployment separates AVS onto a remote host, flip to `false`
+/// and rebuild.
+pub const ALLOW_HTTP_JWKS: bool = true;

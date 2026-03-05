@@ -251,16 +251,12 @@ fn validate_date_dd_mm_yyyy(value: &str) -> Option<String> {
         return Some(format!("Date must be in DD/MM/YYYY format, got '{value}'"));
     }
 
-    let day = value[0..2].parse::<u8>().unwrap_or(0);
-    let month = value[3..5].parse::<u8>().unwrap_or(0);
-
-    if !(1..=31).contains(&day) || !(1..=12).contains(&month) {
-        return Some(format!(
-            "Date must have day 1-31 and month 1-12, got '{value}'"
-        ));
+    // Use chrono for proper calendar validation (leap years, month-specific day limits).
+    let reformatted = format!("{}-{}-{}", &value[6..10], &value[3..5], &value[0..2]);
+    match chrono::NaiveDate::parse_from_str(&reformatted, "%Y-%m-%d") {
+        Ok(_) => None,
+        Err(_) => Some(format!("Invalid calendar date, got '{value}'")),
     }
-
-    None
 }
 
 fn default_pilot_schema() -> Vec<FieldSchema> {

@@ -42,7 +42,7 @@ use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::config::{avs_jwks_url, AVS_ISSUER, JWKS_CACHE_TTL_SECS};
-use crate::crypto::JwksResponse;
+use crate::crypto::{enclave_key, Jwk, JwksResponse};
 use crate::state::AppState;
 
 /// Claims from AVS-issued attestation tokens.
@@ -65,6 +65,9 @@ pub struct AttestationClaims {
     pub role: Option<String>,
     #[serde(default)]
     pub nonce: Option<String>,
+    /// Enclave's public encryption key — used for token-binding validation.
+    #[serde(default)]
+    pub enclave_public_key: Option<Jwk>,
 }
 
 /// Validated token data extracted for request handlers.
@@ -112,11 +115,21 @@ pub struct JwksCache {
 
 /// Fetch JWKS from AVS and parse the decoding keys.
 pub async fn fetch_jwks(url: &str) -> Result<Vec<(String, DecodingKey)>, String> {
-    // Build HTTP client that accepts self-signed certs for HTTPS
-    // (AVS may use self-signed cert in development/staging)
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(10))
+    // Build HTTP client — use AVS_CA_CERT_PATH as trusted root when set,
+    // otherwise use system default CA bundle (no blanket cert bypass).
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10));
+
+    if let Ok(ca_path) = std::env::var("AVS_CA_CERT_PATH") {
+        let pem = std::fs::read(&ca_path)
+            .map_err(|e| format!("failed to read AVS_CA_CERT_PATH ({ca_path}): {e}"))?;
+        let cert = reqwest::Certificate::from_pem(&pem)
+            .map_err(|e| format!("invalid PEM in AVS_CA_CERT_PATH ({ca_path}): {e}"))?;
+        builder = builder.add_root_certificate(cert);
+        tracing::info!(path = %ca_path, "Loaded custom CA certificate for JWKS fetch");
+    }
+
+    let client = builder
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
@@ -133,21 +146,18 @@ pub async fn fetch_jwks(url: &str) -> Result<Vec<(String, DecodingKey)>, String>
     let mut keys = Vec::new();
     for jwk in jwks.keys {
         let kid = jwk.kid.clone().unwrap_or_default();
-        // Support EC P-256 keys (used by AVS).
+        // Only accept EC P-256 keys — AVS signs with ES256 only.
+        // RSA is explicitly rejected to avoid the Marvin Attack (RUSTSEC-2023-0071)
+        // and to enforce the algorithm policy.
         if jwk.kty == "EC" {
             if let (Some(x), Some(y)) = (&jwk.x, &jwk.y) {
-                if let Ok(key) = DecodingKey::from_ec_components(x, y) {
-                    keys.push((kid.clone(), key));
+                match DecodingKey::from_ec_components(x, y) {
+                    Ok(key) => keys.push((kid.clone(), key)),
+                    Err(e) => warn!(kid = %kid, error = %e, "Skipping EC key — failed to parse"),
                 }
             }
-        }
-        // Support RSA keys if needed in future.
-        if jwk.kty == "RSA" {
-            if let (Some(n), Some(e)) = (&jwk.n, &jwk.e) {
-                if let Ok(key) = DecodingKey::from_rsa_components(n, e) {
-                    keys.push((kid.clone(), key));
-                }
-            }
+        } else {
+            warn!(kid = %kid, kty = %jwk.kty, "Ignoring non-EC JWKS key — only EC P-256 (ES256) is accepted");
         }
     }
     Ok(keys)
@@ -157,8 +167,7 @@ pub async fn fetch_jwks(url: &str) -> Result<Vec<(String, DecodingKey)>, String>
 pub async fn get_decoding_keys(state: &AppState) -> Result<Vec<(String, DecodingKey)>, String> {
     // Check cache validity.
     {
-        // Use unwrap_or_else to recover from poisoned lock
-        let cache = state.jwks_cache.read().unwrap_or_else(|e| e.into_inner());
+        let cache = state.jwks_cache.read().await;
         if let Some(ref c) = *cache {
             if c.fetched_at.elapsed().as_secs() < JWKS_CACHE_TTL_SECS {
                 return Ok(c.keys.clone());
@@ -177,8 +186,7 @@ pub async fn get_decoding_keys(state: &AppState) -> Result<Vec<(String, Decoding
     }
     let keys = fetch_jwks(&url).await?;
     {
-        // Use unwrap_or_else to recover from poisoned lock
-        let mut cache = state.jwks_cache.write().unwrap_or_else(|e| e.into_inner());
+        let mut cache = state.jwks_cache.write().await;
         *cache = Some(JwksCache {
             keys: keys.clone(),
             fetched_at: Instant::now(),
@@ -235,13 +243,42 @@ pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenData, 
             format!("token validation failed: {e}")
         })?;
 
+    // Verify token is bound to THIS enclave by comparing public key coordinates.
+    // Prevents token-swap attacks where a legitimate AVS token issued for a
+    // different enclave instance is replayed against this one.
+    // This claim is MANDATORY — tokens without it are rejected.
+    let token_key = token_data.claims.enclave_public_key.as_ref().ok_or_else(|| {
+        warn!(sub = %token_data.claims.sub, "Token missing enclave_public_key claim");
+        "token missing required enclave_public_key claim".to_string()
+    })?;
+    {
+        let actual = enclave_key().public_jwk();
+        let key_matches = token_key.x.as_deref() == actual.x.as_deref()
+            && token_key.y.as_deref() == actual.y.as_deref()
+            && token_key.x.is_some()
+            && token_key.y.is_some();
+        if !key_matches {
+            warn!(
+                sub = %token_data.claims.sub,
+                "Token enclave_public_key does not match this enclave — possible token-swap attack"
+            );
+            return Err("token is not bound to this enclave".to_string());
+        }
+        debug!("Token enclave_public_key verified — matches this enclave");
+    }
+
+    // Missing role defaults to least privilege rather than elevated access.
+    // Tokens without a role claim are treated as read_only.
+    if token_data.claims.role.is_none() {
+        warn!(sub = %token_data.claims.sub, "Token missing role claim — defaulting to read_only");
+    }
     let result = TokenData {
         sub: token_data.claims.sub.clone(),
         role: token_data
             .claims
             .role
             .clone()
-            .unwrap_or_else(|| "user".to_string()),
+            .unwrap_or_else(|| "read_only".to_string()),
     };
 
     info!(
@@ -286,10 +323,12 @@ impl FromRequestParts<AppState> for TokenData {
             )
         })?;
 
-        validate_token(state, token).await.map_err(|e| {
+        validate_token(state, token).await.map_err(|_| {
+            // Detailed errors already logged inside validate_token.
+            // Return generic message to prevent information leakage.
             (
                 StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": e})),
+                Json(serde_json::json!({"error": "invalid or expired token"})),
             )
         })
     }

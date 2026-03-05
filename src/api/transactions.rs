@@ -21,14 +21,15 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::audit_log;
 use crate::auth::UserToken;
-use crate::blockchain::signing::keypair_from_bytes;
+use crate::blockchain::signing::keypair_from_bytes_verified;
 use crate::error::ApiError;
 use crate::indexer;
 use crate::state::AppState;
 use crate::storage::audit::AuditEventType;
-use crate::storage::ownership::OwnershipEnforcer;
 use crate::storage::repository::transactions::{StoredTransaction, TokenType, TxStatus};
-use crate::storage::repository::wallets::{WalletRepository, WalletStatus};
+use crate::storage::repository::wallets::WalletRepository;
+
+use super::enforce_owner_active;
 
 // ============================================================================
 // Request / Response types
@@ -207,9 +208,9 @@ pub async fn send_transaction(
         return Err(ApiError::bad_request("amount must be greater than zero"));
     }
 
-    // Load keypair (never leaves SGX memory).
+    // Load keypair (never leaves SGX memory) and verify it matches the wallet.
     let keypair_bytes = repo.read_keypair(&wallet_id)?;
-    let keypair = keypair_from_bytes(&keypair_bytes)?;
+    let keypair = keypair_from_bytes_verified(&keypair_bytes, &wallet.public_address)?;
 
     // Determine token type and send.
     let (result, token_type) = if payload.token == "native" {
@@ -319,6 +320,22 @@ pub async fn list_transactions(
     enforce_owner_active(&wallet, &token.sub)?;
 
     let limit = query.limit.unwrap_or(20).min(100);
+    let is_first_page = query.cursor.is_none();
+
+    // Serve from cache when the caller requests the first page (no cursor).
+    if is_first_page {
+        if let Some(cached) = state.tx_cache.get_first_page(&wallet.public_address) {
+            let transactions: Vec<TransactionEntry> = cached
+                .into_iter()
+                .take(limit)
+                .map(|(tx, direction)| TransactionEntry { tx, direction })
+                .collect();
+            return Ok(Json(ListTransactionsResponse {
+                transactions,
+                next_cursor: None,
+            }));
+        }
+    }
 
     // Pull fresh tx signatures for this wallet on demand.
     if let Err(e) = indexer::poller::sync_address_once(
@@ -342,6 +359,14 @@ pub async fn list_transactions(
         .tx_db
         .list_by_wallet(&wallet.public_address, query.cursor.as_deref(), limit)
         .map_err(|e| ApiError::internal(format!("tx database error: {e}")))?;
+
+    // Populate cache for first-page results so subsequent identical requests
+    // are served without hitting redb.
+    if is_first_page {
+        state
+            .tx_cache
+            .put_first_page(&wallet.public_address, entries.clone());
+    }
 
     let transactions: Vec<TransactionEntry> = entries
         .into_iter()
@@ -414,28 +439,4 @@ pub async fn get_transaction_status(
     }
 
     Ok(Json(TransactionStatusResponse { transaction: tx }))
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-fn enforce_owner_active(
-    wallet: &crate::storage::repository::wallets::WalletMetadata,
-    caller_sub: &str,
-) -> Result<(), ApiError> {
-    wallet.verify_ownership(caller_sub)?;
-    if wallet.status == WalletStatus::Deleted {
-        return Err(ApiError::not_found(format!(
-            "wallet {} not found",
-            wallet.wallet_id
-        )));
-    }
-    if wallet.status == WalletStatus::Suspended {
-        return Err(ApiError::forbidden(format!(
-            "wallet {} is suspended",
-            wallet.wallet_id
-        )));
-    }
-    Ok(())
 }

@@ -34,7 +34,7 @@ use crate::blockchain::drt::{
     types::*,
     validation::validate_create_pool_request,
 };
-use crate::blockchain::signing::keypair_from_bytes;
+use crate::blockchain::signing::keypair_from_bytes_verified;
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage::audit::AuditEventType;
@@ -63,7 +63,7 @@ fn load_wallet_keypair(
     }
 
     let keypair_bytes = repo.read_keypair(wallet_id)?;
-    let keypair = keypair_from_bytes(&keypair_bytes)?;
+    let keypair = keypair_from_bytes_verified(&keypair_bytes, &wallet.public_address)?;
     Ok((wallet, keypair))
 }
 
@@ -147,7 +147,8 @@ pub async fn create_pool(
 
     // Build and send transaction.
     let instructions =
-        build_create_pool_atomic(&owner, &pool_pda, &payload.pool_name, &drt_configs);
+        build_create_pool_atomic(&owner, &pool_pda, &payload.pool_name, &drt_configs)
+            .map_err(ApiError::internal)?;
     let (sig_str, _events) = sign_send_and_parse(&state, &keypair, instructions).await?;
 
     info!(
@@ -301,7 +302,8 @@ pub async fn buy_drt(
         payload.amount,
         &drt.mint,
         drt.enable_transfer_hook,
-    );
+    )
+    .map_err(ApiError::internal)?;
 
     let (sig_str, events) = sign_send_and_parse(&state, &keypair, vec![ix]).await?;
 
@@ -383,7 +385,8 @@ pub async fn redeem_drt(
     let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
     let drt = find_drt_in_pool(&pool, &payload.drt_type)?;
 
-    let ix = build_redeem_drt(&pool_pda, &keypair.pubkey(), &payload.drt_type, &drt.mint);
+    let ix = build_redeem_drt(&pool_pda, &keypair.pubkey(), &payload.drt_type, &drt.mint)
+        .map_err(ApiError::internal)?;
 
     let (sig_str, events) = sign_send_and_parse(&state, &keypair, vec![ix]).await?;
 

@@ -7,7 +7,7 @@ Gramine:       1.8
 Rust:          1.92.0
 SGX_DEBUG:     0 (production enclave)
 
-mr_enclave:    8dc5eb366433108b15cc784973b8213164d498f2772e71e3578c29d7f9feb1fa
+mr_enclave:    35a6831f10d6bfddf71820f62f070a05bab72442de50c239b6e83ff89a34744e
 mr_signer:     95c165e1e00cab9cb209a6f0771f15189bf32166679812cebf722ecb2dcbd87c
 isv_prod_id:   0
 isv_svn:       0
@@ -30,5 +30,5 @@ Build again on any machine from the same commit:
     relationalnetwork/relational-sdk:local \
     /app/relational-sdk.sig
 
-mr_enclave must match: 8dc5eb366433108b15cc784973b8213164d498f2772e71e3578c29d7f9feb1fa
+mr_enclave must match: 35a6831f10d6bfddf71820f62f070a05bab72442de50c239b6e83ff89a34744e
 mr_signer will differ if a different signing key is used (does NOT affect mr_enclave).
