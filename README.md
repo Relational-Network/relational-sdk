@@ -273,13 +273,28 @@ See [`attestation-client/README.md`](attestation-client/README.md) for details.
 
 | Module | Description |
 |--------|-------------|
-| `main.rs` | Entry point, router |
-| `config.rs` | Configuration constants |
-| `auth.rs` | JWT validation, JWKS caching, RBAC |
-| `crypto.rs` | Enclave keypair, JWK types |
-| `handlers.rs` | HTTP handlers |
-| `health.rs` | Health endpoints |
-| `tls.rs` | TLS utilities |
+| `main.rs` | Entry point, router setup, CORS, security headers |
+| `config.rs` | Configuration constants, env var helpers (CORS, Solana, storage) |
+| `auth.rs` | JWT validation, JWKS caching (10s timeout), RBAC extractors |
+| `crypto.rs` | Enclave keypair, JWK/JWKS types |
+| `data_validation.rs` | CSV schema validation |
+| `error.rs` | Unified ApiError type |
+| `handlers.rs` | Core HTTP handlers (public key, admin, data stubs) |
+| `health.rs` | /health, /health/live, /health/ready |
+| `state.rs` | AppState (JWKS cache, storage, Solana client, tx DB) |
+| `tls.rs` | RA-TLS PEM loading + normalization |
+| `indexer/` | Background Solana transaction poller |
+| `api/admin.rs` | Wallet stats, list all, audit query, suspend/activate |
+| `api/balance.rs` | SPL token + native SOL balance |
+| `api/pools.rs` | DRT pool CRUD: create/get/buy/redeem/close |
+| `api/transactions.rs` | Estimate fee, send, list, status |
+| `api/users.rs` | GET /v1/me — user identity |
+| `api/wallets.rs` | Create/list/get/delete wallet |
+| `blockchain/` | SolanaClient, signing, SPL token ops, DRT contract |
+| `storage/audit.rs` | Per-wallet audit event log |
+| `storage/tx_database.rs` | redb-backed durable transaction store |
+| `storage/tx_cache.rs` | LRU cache (128 entries, 30s TTL) |
+| `storage/repository/` | Typed read/write for wallets, transactions |
 
 ## License
 
