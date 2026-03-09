@@ -22,21 +22,17 @@ on:
     workflows: ["CI"]
     types: [completed]
     branches: [staging]
-  workflow_dispatch:
-    branches: [staging]
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: relational-network/relational-sdk
 
 jobs:
-  # Gate: only deploy if CI succeeded (workflow_dispatch always runs)
+  # Gate: only deploy if CI succeeded
   gate:
     name: Check CI Result
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+    if: github.event.workflow_run.conclusion == 'success'
     steps:
       - run: echo "CI passed — proceeding with deployment"
 
