@@ -228,6 +228,7 @@ jobs:
           context: .
           file: docker/Dockerfile
           push: ${{ github.event_name == 'push' }}
+          load: true
           tags: |
             ghcr.io/relational-network/relational-sdk:sha-${{ github.sha }}
             ${{ github.ref == 'refs/heads/staging' && 'ghcr.io/relational-network/relational-sdk:staging-latest' || '' }}
@@ -252,7 +253,6 @@ jobs:
             /app/relational-sdk.sig >> $GITHUB_STEP_SUMMARY
 
       - name: Verify MRENCLAVE matches measurements.txt
-        if: github.event_name == 'push'
         run: |
           BUILT_MR=$(docker run --rm \
             --entrypoint gramine-sgx-sigstruct-view \
