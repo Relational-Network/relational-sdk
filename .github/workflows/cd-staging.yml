@@ -7,8 +7,10 @@
 # and deploys it to the staging VM. No building or signing happens here —
 # the staging VM only needs Docker and SGX hardware to run the enclave.
 #
+# Called directly by CI after build-docker succeeds (workflow_call).
+# This ensures the CD file is always from the same commit as CI
+#
 # Flow:
-#   0. Triggered automatically AFTER CI succeeds (workflow_run)
 #   1. Verify staging VM is reachable via SSH
 #   2. Pull sha-<commit> image from GHCR
 #   3. Extract measurements, validate MRSIGNER hasn't changed, update .env
@@ -18,10 +20,16 @@
 name: CD - Staging
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [staging]
+  workflow_call:
+    inputs:
+      commit_sha:
+        description: 'The commit SHA to deploy (image tag will be sha-<commit>)'
+        required: true
+        type: string
+      image_tag:
+        description: 'Override Docker image tag (e.g., sha-abc123). Leave empty to use commit_sha.'
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       image_tag:
@@ -39,18 +47,9 @@ env:
   IMAGE_NAME: relational-network/relational-sdk
 
 jobs:
-  # Gate: only deploy if CI succeeded (skipped for manual triggers)
-  gate:
-    name: Check CI Result
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
-    steps:
-      - run: echo "Proceeding with deployment"
-
   check-staging-online:
     name: Check Staging VM is Online
     runs-on: ubuntu-latest
-    needs: gate
     outputs:
       online: ${{ steps.check.outputs.online }}
     steps:
@@ -90,7 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ inputs.commit_sha || github.sha }}
           sparse-checkout: scripts/
 
       - name: Copy scripts to staging VM
@@ -106,7 +105,7 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-          COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          COMMIT_SHA: ${{ inputs.commit_sha || github.sha }}
           MANUAL_TAG: ${{ inputs.image_tag || '' }}
         with:
           host: ${{ secrets.STAGING_HOST }}

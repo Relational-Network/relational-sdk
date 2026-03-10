@@ -281,3 +281,15 @@ jobs:
             exit 1
           fi
           echo "✓ MRENCLAVE matches measurements.txt"
+
+  # ── Deploy to staging ──────────────────────────────────────────────────────
+  # Called directly after build-docker succeeds on push to staging.
+  # Uses workflow_call so the CD file is always from the same commit as CI
+  deploy-staging:
+    name: Deploy to Staging
+    needs: build-docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+    uses: ./.github/workflows/cd-staging.yml
+    with:
+      commit_sha: ${{ github.sha }}
+    secrets: inherit
