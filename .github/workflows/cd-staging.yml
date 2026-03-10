@@ -236,7 +236,35 @@ jobs:
 
             sudo systemctl daemon-reload
 
-            # ── Phase 2: Atomic stop → start ──────────────────────────
+            # ── Phase 2: Restart AVS first (with new measurements) ────
+            # AVS must load the new MRENCLAVE BEFORE the enclave starts,
+            # because the enclave does secret provisioning on startup:
+            #   enclave → RA-TLS handshake → AVS:4433 verifies quote
+            # If AVS still has the old MRENCLAVE, it rejects the quote
+            # and secret provisioning fails → enclave crashes.
+            echo ""
+            echo "=== Restarting AVS (to load new measurements) ==="
+            sudo systemctl restart avs
+            sleep 5
+
+            # Verify AVS is healthy and serving JWKS (enclave needs this too)
+            for i in 1 2 3 4 5; do
+                if curl -sf --max-time 5 http://127.0.0.1:9100/.well-known/jwks.json >/dev/null 2>&1; then
+                    echo "AVS is ready (JWKS available)"
+                    break
+                fi
+                echo "Waiting for AVS... (attempt $i/5)"
+                sleep 3
+            done
+
+            curl -sf --max-time 10 http://127.0.0.1:9100/health || {
+                echo "AVS health check failed after restart!"
+                sudo journalctl -u avs --no-pager -n 50
+                exit 1
+            }
+
+            # ── Phase 3: Stop old enclave → start new one ─────────────
+            echo ""
             echo "=== Stopping current enclave ==="
             sudo systemctl stop enclave || true
             # Extra safety: ensure leftover container is removed
@@ -247,7 +275,7 @@ jobs:
             sudo systemctl start enclave
             sleep 15
 
-            # ── Phase 3: Verify correct image is running ──────────────
+            echo ""
             echo "=== Verifying correct Docker image ==="
             RUNNING_IMAGE=$(sudo docker inspect enclave --format '{{.Config.Image}}' 2>/dev/null || echo "NONE")
             echo "Expected: $IMAGE"
@@ -288,17 +316,6 @@ jobs:
             curl -sf --max-time 10 -k https://127.0.0.1:8080/health || {
                 echo "Enclave health check failed!"
                 sudo journalctl -u enclave --no-pager -n 50
-                exit 1
-            }
-
-            echo ""
-            echo "=== Restarting AVS (to load new measurements) ==="
-            sudo systemctl restart avs
-            sleep 10
-
-            curl -sf --max-time 10 http://127.0.0.1:9100/health || {
-                echo "AVS health check failed!"
-                sudo journalctl -u avs --no-pager -n 50
                 exit 1
             }
 
