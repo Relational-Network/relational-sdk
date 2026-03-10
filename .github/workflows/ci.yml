@@ -9,7 +9,7 @@
 #   - Security audit (cargo audit)
 #   - Dockerfile lint (hadolint)
 #   - Docker image build + sign (build-time signing via --mount=type=secret)
-#     - On push to staging/main: pushed to GHCR, measurements printed to job summary
+#     - On push to staging: pushed to GHCR, measurements printed to job summary
 #     - On pull_request: built locally for verification only (not pushed)
 #
 # For full SGX testing including RA-TLS attestation, run on an SGX VM:
@@ -20,9 +20,9 @@ name: CI
 
 on:
   push:
-    branches: [main, staging]
+    branches: [staging]
   pull_request:
-    branches: [main, staging]
+    branches: [staging]
 
 env:
   CARGO_TERM_COLOR: always
@@ -241,7 +241,6 @@ jobs:
           tags: |
             ghcr.io/relational-network/relational-sdk:sha-${{ github.sha }}
             ${{ github.ref == 'refs/heads/staging' && 'ghcr.io/relational-network/relational-sdk:staging-latest' || '' }}
-            ${{ github.ref == 'refs/heads/main' && 'ghcr.io/relational-network/relational-sdk:latest' || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           secret-files: |
