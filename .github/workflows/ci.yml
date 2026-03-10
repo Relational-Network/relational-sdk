@@ -23,6 +23,13 @@ on:
     branches: [staging]
   pull_request:
     branches: [staging]
+  workflow_dispatch:
+    inputs:
+      force_docker:
+        description: 'Force Docker image build even if no docker-related files changed'
+        required: false
+        type: boolean
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -171,7 +178,7 @@ jobs:
       (needs.check.result == 'success' || needs.check.result == 'skipped') &&
       (needs.security.result == 'success' || needs.security.result == 'skipped') &&
       (needs.validate-config.result == 'success' || needs.validate-config.result == 'skipped') &&
-      needs.changes.outputs.docker == 'true'
+      (needs.changes.outputs.docker == 'true' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.force_docker))
     permissions:
       contents: read
       packages: write
