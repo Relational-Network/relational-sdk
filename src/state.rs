@@ -3,7 +3,7 @@
 
 //! Extended application state with wallet service dependencies.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::auth::JwksCache;
 use crate::blockchain::SolanaClient;
@@ -18,7 +18,7 @@ pub struct AppState {
     /// Expected `aud` claim.
     pub audience: String,
     /// Cached AVS JWKS keys for token verification.
-    pub jwks_cache: Arc<RwLock<Option<JwksCache>>>,
+    pub jwks_cache: Arc<tokio::sync::RwLock<Option<JwksCache>>>,
 
     // ── Wallet service (new) ────────────────────────────────────
     /// Encrypted filesystem for wallet metadata + keypairs.

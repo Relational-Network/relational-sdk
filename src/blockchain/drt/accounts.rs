@@ -10,6 +10,13 @@ use solana_sdk::pubkey::Pubkey;
 use super::types::{DrtConfig, Pool, DISC_POOL_ACCOUNT};
 use crate::error::ApiError;
 
+/// Maximum expected size of a Pool account (after discriminator).
+///
+/// Solana accounts can be up to 10 MiB, but a realistic Pool with several DRT
+/// configs is far smaller. We cap deserialization to 10 KiB to prevent
+/// Borsh from allocating unbounded memory when given untrusted RPC data.
+const MAX_POOL_DATA_SIZE: usize = 10 * 1024;
+
 /// Fetch and deserialize a Pool account from chain.
 ///
 /// Verifies the 8-byte Anchor discriminator before Borsh deserialization.
@@ -31,7 +38,15 @@ pub async fn fetch_pool(rpc: &RpcClient, pool_pda: &Pubkey) -> Result<Pool, ApiE
         ));
     }
 
-    Pool::try_from_slice(&data[8..])
+    let payload = &data[8..];
+    if payload.len() > MAX_POOL_DATA_SIZE {
+        return Err(ApiError::internal(format!(
+            "pool account data too large ({} bytes, max {MAX_POOL_DATA_SIZE})",
+            payload.len()
+        )));
+    }
+
+    Pool::try_from_slice(payload)
         .map_err(|e| ApiError::internal(format!("failed to deserialize pool account: {e}")))
 }
 

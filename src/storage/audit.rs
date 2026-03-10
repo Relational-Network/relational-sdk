@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Relational Network
 
-//! Audit event logging (daily JSONL append).
+//! Audit event logging (daily JSONL append) with HMAC integrity.
 //!
 //! Each day's events are written to `/data/audit/{YYYY-MM-DD}.jsonl`.
 //! Events are **appended** (never overwritten) for tamper-evident logging.
+//! An HMAC-SHA256 tag is computed over each event's canonical JSON so that
+//! any post-hoc modification of the log file is detectable.
 
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
-use std::io::Write;
+use sha2::Sha256;
+use tokio::io::AsyncWriteExt;
 use tracing::warn;
 
 use super::encrypted_fs::EncryptedStorage;
@@ -42,6 +45,29 @@ pub struct AuditEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
     pub success: bool,
+    /// HMAC-SHA256 integrity tag over the canonical JSON of this event
+    /// (computed with `hmac` field absent). `None` for legacy events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Derive a 32-byte HMAC key from the enclave's P-256 **private** scalar via HKDF.
+///
+/// The private key material never leaves the process — `EnclaveKey::hmac_key()`
+/// performs the HKDF derivation internally and returns only the purpose-bound
+/// output key.
+fn audit_hmac_key() -> [u8; 32] {
+    crate::crypto::enclave_key().hmac_key(b"audit-hmac-v1")
+}
+
+/// Compute HMAC-SHA256 of a canonical JSON blob.
+fn compute_hmac(json_bytes: &[u8]) -> String {
+    let key = audit_hmac_key();
+    let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC can take key of any size");
+    mac.update(json_bytes);
+    hex::encode(mac.finalize().into_bytes())
 }
 
 impl AuditEvent {
@@ -56,6 +82,7 @@ impl AuditEvent {
             resource_id: None,
             details: None,
             success: true,
+            hmac: None,
         }
     }
 
@@ -75,20 +102,6 @@ impl AuditEvent {
         self.resource_id = Some(resource_id.into());
         self
     }
-
-    /// Mark as a failed action (e.g., permission denied).
-    #[allow(dead_code)]
-    pub fn failed(mut self) -> Self {
-        self.success = false;
-        self
-    }
-
-    /// Attach arbitrary detail JSON.
-    #[allow(dead_code)]
-    pub fn with_details(mut self, details: serde_json::Value) -> Self {
-        self.details = Some(details);
-        self
-    }
 }
 
 /// Writes [`AuditEvent`]s to daily JSONL files.
@@ -103,49 +116,91 @@ impl<'a> AuditRepository<'a> {
 
     /// Append an event to today's audit log.
     ///
+    /// The HMAC tag is computed over the canonical JSON (with the `hmac` field
+    /// absent), then the full event including `hmac` is serialised and appended.
+    ///
     /// Errors are logged but **not** propagated — audit logging must never
     /// block business logic.
-    pub fn log(&self, event: &AuditEvent) {
+    pub async fn log(&self, event: &AuditEvent) {
         let date = event.timestamp.format("%Y-%m-%d").to_string();
         let path = self.storage.paths().audit_events_file(&date);
 
         // Ensure audit directory exists.
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = tokio::fs::create_dir_all(parent).await;
         }
 
-        match serde_json::to_string(event) {
-            Ok(mut line) => {
-                line.push('\n');
-                if let Err(e) = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                    .and_then(|mut f| f.write_all(line.as_bytes()))
-                {
-                    warn!(error = %e, path = %path.display(), "Failed to write audit event");
+        // Compute HMAC over the canonical JSON (without hmac field).
+        let mut canonical = event.clone();
+        canonical.hmac = None;
+        match serde_json::to_string(&canonical) {
+            Ok(canonical_json) => {
+                let tag = compute_hmac(canonical_json.as_bytes());
+                let mut signed = event.clone();
+                signed.hmac = Some(tag);
+                match serde_json::to_string(&signed) {
+                    Ok(mut line) => {
+                        line.push('\n');
+                        match tokio::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)
+                            .await
+                        {
+                            Ok(mut f) => {
+                                if let Err(e) = f.write_all(line.as_bytes()).await {
+                                    warn!(error = %e, path = %path.display(), "Failed to write audit event");
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, path = %path.display(), "Failed to open audit log file");
+                            }
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "Failed to serialize signed audit event"),
                 }
             }
             Err(e) => {
-                warn!(error = %e, "Failed to serialize audit event");
+                warn!(error = %e, "Failed to serialize audit event for HMAC");
             }
         }
     }
 
-    /// Read all events for a given date (for admin querying).
-    pub fn read_events(&self, date: &str) -> Vec<AuditEvent> {
+    /// Read only events with a valid HMAC for the given date.
+    ///
+    /// Legacy events without an HMAC field are excluded.
+    pub fn read_verified_events(&self, date: &str) -> Vec<AuditEvent> {
         let path = self.storage.paths().audit_events_file(date);
         let data = match std::fs::read_to_string(&path) {
             Ok(d) => d,
             Err(_) => return Vec::new(),
         };
         data.lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
+            .filter_map(|line| {
+                let event: AuditEvent = serde_json::from_str(line).ok()?;
+                let tag = event.hmac.as_ref()?;
+                let mut canonical = event.clone();
+                canonical.hmac = None;
+                let canonical_json = serde_json::to_string(&canonical).ok()?;
+                let expected = compute_hmac(canonical_json.as_bytes());
+                if tag == &expected {
+                    Some(event)
+                } else {
+                    warn!(
+                        event_id = %event.event_id,
+                        "Audit event HMAC mismatch — excluding"
+                    );
+                    None
+                }
+            })
             .collect()
     }
 }
 
 /// Convenience macro for fire-and-forget audit logging.
+///
+/// Must be called from inside an async context (handler). The `.await` is
+/// non-blocking because it uses `tokio::fs` internally.
 ///
 /// ```rust,ignore
 /// audit_log!(storage, AuditEventType::WalletCreated, "user_123", "wallet", "wallet_456");
@@ -158,6 +213,7 @@ macro_rules! audit_log {
             &$crate::storage::audit::AuditEvent::new($event_type)
                 .with_user($user_id)
                 .with_resource($resource_type, $resource_id),
-        );
+        )
+        .await;
     }};
 }

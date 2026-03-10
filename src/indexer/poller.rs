@@ -12,7 +12,7 @@ use solana_client::rpc_config::RpcTransactionConfig;
 use solana_commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
-use solana_transaction_status::UiTransactionEncoding;
+use solana_transaction_status::{EncodedTransaction, UiMessage, UiTransactionEncoding};
 use std::str::FromStr;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
@@ -154,13 +154,27 @@ async fn poll_address(
                 };
 
                 let now = Utc::now();
+
+                // Extract fee payer (first account key) to determine direction.
+                let fee_payer =
+                    extract_fee_payer(&tx_detail.transaction.transaction).unwrap_or_default();
+                let is_sender = fee_payer == address;
+
                 let stored = StoredTransaction {
                     signature: sig_str.clone(),
                     wallet_id: wallet_id.to_string(),
                     counterparty_wallet_id: None,
-                    from: address.to_string(), // simplification — sender
-                    to: String::new(),         // parsed below if available
-                    amount: "0".to_string(),   // parsed below if available
+                    from: if is_sender {
+                        address.to_string()
+                    } else {
+                        fee_payer
+                    },
+                    to: if is_sender {
+                        String::new()
+                    } else {
+                        address.to_string()
+                    },
+                    amount: "0".to_string(), // parsed below if available
                     token: TokenType::Native,
                     network: solana.network().name.to_string(),
                     status,
@@ -174,12 +188,8 @@ async fn poll_address(
                     updated_at: now,
                 };
 
-                // Determine direction: if this address is the signer, it's "sent".
-                let direction = if stored.from == address {
-                    "sent"
-                } else {
-                    "received"
-                };
+                // Determine direction: if this address is the fee payer, it's "sent".
+                let direction = if is_sender { "sent" } else { "received" };
                 let directions = vec![(address.to_string(), direction)];
 
                 if let Err(e) = tx_db.upsert_transaction(&stored, &directions) {
@@ -201,4 +211,18 @@ async fn poll_address(
     tx_cache.invalidate(address);
 
     Ok(())
+}
+
+/// Extract the fee payer (first account key) from an encoded Solana transaction.
+///
+/// The fee payer is the first key in the account list. If this address matches
+/// the wallet being indexed, the transaction was "sent" by this wallet.
+fn extract_fee_payer(tx: &EncodedTransaction) -> Option<String> {
+    match tx {
+        EncodedTransaction::Json(ui_tx) => match &ui_tx.message {
+            UiMessage::Parsed(parsed) => parsed.account_keys.first().map(|a| a.pubkey.clone()),
+            UiMessage::Raw(raw) => raw.account_keys.first().cloned(),
+        },
+        _ => None,
+    }
 }

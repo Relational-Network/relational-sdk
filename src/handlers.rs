@@ -15,7 +15,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 use utoipa::ToSchema;
@@ -124,13 +123,14 @@ pub struct AdminStatusResponse {
 )]
 pub async fn admin_status(AdminToken(token): AdminToken) -> Json<AdminStatusResponse> {
     info!(admin_user = %token.sub, "Admin status requested");
+    let uptime_seconds = crate::STARTED_AT
+        .get()
+        .map(|t| t.elapsed().as_secs())
+        .unwrap_or(0);
     Json(AdminStatusResponse {
         status: "operational".to_string(),
         admin_user: token.sub,
-        uptime_seconds: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        uptime_seconds,
     })
 }
 
@@ -244,6 +244,12 @@ pub async fn data_upload_file(
     }
 
     let record_id = Uuid::new_v4().to_string();
+    // Sanitise schema_id to prevent path traversal (e.g. "../../etc/passwd").
+    if !is_safe_identifier(&payload.schema_id) {
+        return Err(ApiError::bad_request(
+            "schema_id must contain only alphanumeric characters, hyphens, and underscores",
+        ));
+    }
     let upload_dir = state
         .storage
         .paths()
@@ -287,17 +293,22 @@ pub async fn data_upload_file(
 
 /// Request body for data upload.
 ///
-/// 1. Decode `encrypted_data` from base64
-/// 2. Decrypt using ECIES with enclave's P-256 private key
-/// 3. Validate `nonce` for replay protection (store in memory/DB **TODO**)
-/// 4. Process decrypted payload and store results
+/// 1. Decode `encrypted_data`, `ephemeral_public_key`, and `iv` from base64
+/// 2. Perform ECDH key agreement using the ephemeral public key + enclave private key
+/// 3. Derive AES-256-GCM key via HKDF, decrypt ciphertext
+/// 4. Validate `nonce` for replay protection (reject reused nonces)
+/// 5. Store decrypted payload to Gramine encrypted FS
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct DataUploadRequest {
-    /// Base64-encoded encrypted data.
+    /// Base64-encoded AES-GCM ciphertext (encrypted with derived ECDH shared secret).
     pub encrypted_data: String,
-    /// Optional nonce for replay protection.
-    #[serde(default)]
-    pub nonce: Option<String>,
+    /// Base64-encoded ephemeral P-256 public key (SEC1 uncompressed bytes).
+    /// The client generates this per-upload for forward secrecy.
+    pub ephemeral_public_key: String,
+    /// Base64-encoded 12-byte AES-GCM nonce/IV used for encryption.
+    pub iv: String,
+    /// Unique nonce for replay protection (required). Reject duplicate nonces.
+    pub nonce: String,
 }
 
 /// Response for data upload.
@@ -327,27 +338,71 @@ pub struct DataUploadResponse {
 )]
 pub async fn data_upload(
     UserToken(token): UserToken,
+    State(state): State<AppState>,
     Json(payload): Json<DataUploadRequest>,
-) -> Json<DataUploadResponse> {
+) -> Result<Json<DataUploadResponse>, ApiError> {
     let record_id = Uuid::new_v4().to_string();
     info!(
         sub = %token.sub,
         role = %token.role,
         record_id = %record_id,
         data_size = payload.encrypted_data.len(),
-        has_nonce = payload.nonce.is_some(),
         "Data upload received"
     );
-    // TODO: Implement encrypted data processing:
-    // 1. Base64-decode payload.encrypted_data
-    // 2. Decrypt using enclave's P-256 private key (ECIES or ECDH-ES+A256GCM)
-    // 3. Validate payload.nonce for replay protection
-    // 4. Parse and process the decrypted data
-    // 5. Store results securely within enclave
-    Json(DataUploadResponse {
-        status: "received".to_string(),
+
+    // ── 1. Nonce replay protection (mandatory) ──────────────────────
+    {
+        let is_new = state
+            .tx_db
+            .record_nonce(&payload.nonce)
+            .map_err(|e| ApiError::internal(format!("nonce check failed: {e}")))?;
+        if !is_new {
+            return Err(ApiError::conflict("nonce already used — replay rejected"));
+        }
+        debug!(nonce = %payload.nonce, "Nonce accepted (first use)");
+    }
+
+    // ── 2. ECDH-ES + AES-256-GCM decryption ─────────────────────────
+    let plaintext = crate::crypto::decrypt_ecdh_payload(
+        &payload.encrypted_data,
+        &payload.ephemeral_public_key,
+        &payload.iv,
+    )
+    .map_err(ApiError::bad_request)?;
+
+    // ── 3. Store decrypted data to encrypted FS (Gramine auto-encrypts at rest)
+    let upload_dir = state
+        .storage
+        .paths()
+        .root()
+        .join("uploads")
+        .join("decrypted");
+    state.storage.create_dir(&upload_dir)?;
+
+    let data_path = upload_dir.join(format!("{record_id}.bin"));
+    state.storage.write_raw(&data_path, &plaintext)?;
+
+    // Persist metadata for audit/query.
+    let meta = serde_json::json!({
+        "record_id": record_id,
+        "uploaded_by": token.sub,
+        "plaintext_size_bytes": plaintext.len(),
+        "uploaded_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let meta_path = upload_dir.join(format!("{record_id}.meta.json"));
+    state.storage.write_json(&meta_path, &meta)?;
+
+    info!(
+        sub = %token.sub,
+        record_id = %record_id,
+        plaintext_size = plaintext.len(),
+        "Decrypted data stored to encrypted FS"
+    );
+
+    Ok(Json(DataUploadResponse {
+        status: "stored".to_string(),
         record_id,
-    })
+    }))
 }
 
 /// Response for data query.
@@ -403,45 +458,33 @@ async fn parse_csv_payload(multipart: Multipart) -> Result<ParsedCsvPayload, Api
         .schema_id
         .unwrap_or_else(|| DEFAULT_SCHEMA_ID.to_string());
 
-    if input.file.is_some() && input.encrypted_data.is_some() {
+    // Only encrypted uploads are accepted — plaintext file uploads are rejected.
+    if input.file.is_some() {
         return Err(ApiError::bad_request(
-            "provide either 'file' or 'encrypted_data', not both",
+            "plaintext file uploads are not accepted — use encrypted_data with ephemeral_public_key and nonce",
         ));
-    }
-
-    if let Some(file_bytes) = input.file {
-        ensure_size_limit(&file_bytes)?;
-        return Ok(ParsedCsvPayload {
-            schema_id,
-            csv_bytes: file_bytes,
-            source: "multipart_file".to_string(),
-        });
     }
 
     let encrypted_data = input
         .encrypted_data
-        .ok_or_else(|| ApiError::bad_request("missing file field or encrypted_data field"))?;
+        .ok_or_else(|| ApiError::bad_request("missing encrypted_data field"))?;
 
-    let csv_bytes = match (input.ephemeral_public_key, input.nonce) {
-        (Some(ephemeral_public_key), Some(nonce)) => {
-            crate::crypto::decrypt_ecdh_payload(&encrypted_data, &ephemeral_public_key, &nonce)
-                .map_err(ApiError::bad_request)?
-        }
-        (None, None) => decode_base64_any(&encrypted_data)
-            .ok_or_else(|| ApiError::bad_request("encrypted_data is not valid base64/base64url"))?,
-        _ => {
-            return Err(ApiError::bad_request(
-                "ephemeral_public_key and nonce must be provided together",
-            ));
-        }
-    };
+    let ephemeral_key = input.ephemeral_public_key.ok_or_else(|| {
+        ApiError::bad_request("ephemeral_public_key is required for encrypted uploads")
+    })?;
+    let nonce = input
+        .nonce
+        .ok_or_else(|| ApiError::bad_request("nonce is required for encrypted uploads"))?;
+
+    let csv_bytes = crate::crypto::decrypt_ecdh_payload(&encrypted_data, &ephemeral_key, &nonce)
+        .map_err(ApiError::bad_request)?;
 
     ensure_size_limit(&csv_bytes)?;
 
     Ok(ParsedCsvPayload {
         schema_id,
         csv_bytes,
-        source: "multipart_encrypted_or_base64".to_string(),
+        source: "multipart_encrypted".to_string(),
     })
 }
 
@@ -516,19 +559,12 @@ fn ensure_size_limit(bytes: &[u8]) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn decode_base64_any(input: &str) -> Option<Vec<u8>> {
-    base64::engine::general_purpose::STANDARD
-        .decode(input)
-        .ok()
-        .or_else(|| {
-            base64::engine::general_purpose::STANDARD_NO_PAD
-                .decode(input)
-                .ok()
-        })
-        .or_else(|| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(input)
-                .ok()
-        })
-        .or_else(|| base64::engine::general_purpose::URL_SAFE.decode(input).ok())
+/// Validate an identifier contains only safe characters (alphanumeric, `-`, `_`).
+/// Prevents path-traversal when the value is used in filesystem paths.
+fn is_safe_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }

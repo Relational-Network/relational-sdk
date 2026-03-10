@@ -9,6 +9,7 @@
 
 pub mod accounts;
 pub mod events;
+pub mod idl_generated;
 pub mod instructions;
 pub mod pda;
 pub mod types;

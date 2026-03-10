@@ -14,13 +14,15 @@ use solana_sdk::{
     pubkey::Pubkey,
 };
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use super::pda::{derive_extra_metas_pda, derive_mint_pda, derive_vault_ata};
 use super::types::*;
 use crate::config::drt_program_id;
 
 fn system_program_id() -> Pubkey {
-    Pubkey::from_str(SYSTEM_PROGRAM_ID_STR).unwrap()
+    static ID: OnceLock<Pubkey> = OnceLock::new();
+    *ID.get_or_init(|| Pubkey::from_str(SYSTEM_PROGRAM_ID_STR).expect("valid system program ID"))
 }
 
 // ============================================================================
@@ -28,15 +30,26 @@ fn system_program_id() -> Pubkey {
 // ============================================================================
 
 fn token_2022_program_id() -> Pubkey {
-    Pubkey::from_str(TOKEN_2022_PROGRAM_ID_STR).unwrap()
+    static ID: OnceLock<Pubkey> = OnceLock::new();
+    *ID.get_or_init(|| {
+        Pubkey::from_str(TOKEN_2022_PROGRAM_ID_STR).expect("valid Token-2022 program ID")
+    })
 }
 
 fn associated_token_program_id() -> Pubkey {
-    Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID_STR).unwrap()
+    static ID: OnceLock<Pubkey> = OnceLock::new();
+    *ID.get_or_init(|| {
+        Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID_STR).expect("valid ATA program ID")
+    })
 }
 
 /// Build a `ComputeBudgetProgram::SetComputeUnitLimit` instruction.
 pub fn build_compute_budget_ix(units: u32) -> Instruction {
+    static COMPUTE_BUDGET_ID: OnceLock<Pubkey> = OnceLock::new();
+    let program_id = *COMPUTE_BUDGET_ID.get_or_init(|| {
+        Pubkey::from_str("ComputeBudget111111111111111111111111111111")
+            .expect("valid ComputeBudget program ID")
+    });
     // ComputeBudget instruction index 2 = SetComputeUnitLimit, followed by u32 LE.
     let data = {
         let mut buf = vec![2u8]; // instruction type
@@ -44,7 +57,7 @@ pub fn build_compute_budget_ix(units: u32) -> Instruction {
         buf
     };
     Instruction {
-        program_id: Pubkey::from_str("ComputeBudget111111111111111111111111111111").unwrap(),
+        program_id,
         accounts: vec![],
         data,
     }
@@ -65,7 +78,7 @@ pub fn build_create_pool_atomic(
     pool_pda: &Pubkey,
     pool_name: &str,
     drt_configs: &[DrtInitConfig],
-) -> Vec<Instruction> {
+) -> Result<Vec<Instruction>, String> {
     let program_id = drt_program_id();
 
     // Serialize instruction data: discriminator + args (name: String, drt_configs: Vec<DrtInitConfig>).
@@ -74,11 +87,11 @@ pub fn build_create_pool_atomic(
     pool_name
         .to_string()
         .serialize(&mut data)
-        .expect("Borsh serialize name");
+        .map_err(|e| format!("Borsh serialize pool_name: {e}"))?;
     drt_configs
         .to_vec()
         .serialize(&mut data)
-        .expect("Borsh serialize drt_configs");
+        .map_err(|e| format!("Borsh serialize drt_configs: {e}"))?;
 
     // Named accounts.
     let mut accounts = vec![
@@ -107,7 +120,7 @@ pub fn build_create_pool_atomic(
     };
 
     // Include compute budget instruction for multi-DRT transactions.
-    vec![build_compute_budget_ix(800_000), main_ix]
+    Ok(vec![build_compute_budget_ix(800_000), main_ix])
 }
 
 // ============================================================================
@@ -126,7 +139,7 @@ pub fn build_buy_drt(
     amount: u64,
     mint: &Pubkey,
     hook_enabled: bool,
-) -> Instruction {
+) -> Result<Instruction, String> {
     let program_id = drt_program_id();
 
     // Serialize instruction data: discriminator + drt_type + amount.
@@ -135,8 +148,10 @@ pub fn build_buy_drt(
     drt_type
         .to_string()
         .serialize(&mut data)
-        .expect("Borsh serialize drt_type");
-    amount.serialize(&mut data).expect("Borsh serialize amount");
+        .map_err(|e| format!("Borsh serialize drt_type: {e}"))?;
+    amount
+        .serialize(&mut data)
+        .map_err(|e| format!("Borsh serialize amount: {e}"))?;
 
     let vault_ata = derive_vault_ata(pool_pda, mint);
     let buyer_ata = super::pda::derive_user_ata(buyer, mint);
@@ -160,11 +175,11 @@ pub fn build_buy_drt(
         accounts.push(AccountMeta::new_readonly(program_id, false));
     }
 
-    Instruction {
+    Ok(Instruction {
         program_id,
         accounts,
         data,
-    }
+    })
 }
 
 // ============================================================================
@@ -177,7 +192,7 @@ pub fn build_redeem_drt(
     user: &Pubkey,
     drt_type: &str,
     mint: &Pubkey,
-) -> Instruction {
+) -> Result<Instruction, String> {
     let program_id = drt_program_id();
 
     let mut data = Vec::new();
@@ -185,7 +200,7 @@ pub fn build_redeem_drt(
     drt_type
         .to_string()
         .serialize(&mut data)
-        .expect("Borsh serialize drt_type");
+        .map_err(|e| format!("Borsh serialize drt_type: {e}"))?;
 
     let user_ata = super::pda::derive_user_ata(user, mint);
 
@@ -197,11 +212,11 @@ pub fn build_redeem_drt(
         AccountMeta::new_readonly(token_2022_program_id(), false), // token_program
     ];
 
-    Instruction {
+    Ok(Instruction {
         program_id,
         accounts,
         data,
-    }
+    })
 }
 
 // ============================================================================

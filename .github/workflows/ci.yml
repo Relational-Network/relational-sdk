@@ -9,7 +9,7 @@
 #   - Security audit (cargo audit)
 #   - Dockerfile lint (hadolint)
 #   - Docker image build + sign (build-time signing via --mount=type=secret)
-#     - On push to staging/main: pushed to GHCR, measurements printed to job summary
+#     - On push to staging: pushed to GHCR, measurements printed to job summary
 #     - On pull_request: built locally for verification only (not pushed)
 #
 # For full SGX testing including RA-TLS attestation, run on an SGX VM:
@@ -20,9 +20,9 @@ name: CI
 
 on:
   push:
-    branches: [main, staging]
+    branches: [staging]
   pull_request:
-    branches: [main, staging]
+    branches: [staging]
 
 env:
   CARGO_TERM_COLOR: always
@@ -42,8 +42,8 @@ jobs:
       docker: ${{ steps.filter.outputs.docker }}
       config: ${{ steps.filter.outputs.config }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v6.0.2
+      - uses: dorny/paths-filter@v3.0.2
         id: filter
         with:
           filters: |
@@ -69,23 +69,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      - uses: Swatinem/rust-cache@v2.8.2
 
       - name: Check formatting
         run: cargo fmt --check
@@ -99,19 +90,16 @@ jobs:
   security:
     name: Security Audit
     runs-on: ubuntu-latest
-    needs: [changes, check]
+    needs: changes
     if: needs.changes.outputs.rust == 'true'
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit@0.22.1 --locked
-
-      - name: Run audit
-        run: cargo audit
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
         # Note: We use P-256 ECDSA only (no RSA) to avoid vulnerabilities like
         # RUSTSEC-2023-0071. The jsonwebtoken crate is configured with only the
         # "p256" feature to exclude RSA dependencies entirely.
@@ -119,13 +107,10 @@ jobs:
   validate-config:
     name: Validate Configuration Files
     runs-on: ubuntu-latest
-    needs: [changes, check]
+    needs: changes
     if: needs.changes.outputs.config == 'true'
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install systemd (for systemd-analyze)
-        run: sudo apt-get update && sudo apt-get install -y systemd
+      - uses: actions/checkout@v6.0.2
 
       - name: Validate systemd unit files
         run: |
@@ -180,19 +165,24 @@ jobs:
   build-docker:
     name: Build & Sign Docker Image
     runs-on: ubuntu-latest
-    needs: [changes, check]
-    if: always() && (needs.check.result == 'success' || needs.check.result == 'skipped') && needs.changes.outputs.docker == 'true'
+    needs: [changes, check, security, validate-config]
+    if: |
+      always() &&
+      (needs.check.result == 'success' || needs.check.result == 'skipped') &&
+      (needs.security.result == 'success' || needs.security.result == 'skipped') &&
+      (needs.validate-config.result == 'success' || needs.validate-config.result == 'skipped') &&
+      needs.changes.outputs.docker == 'true'
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: github.event_name == 'push'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -233,7 +223,7 @@ jobs:
           echo "✓ Valid 3072-bit RSA key with exponent 3"
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
@@ -241,7 +231,6 @@ jobs:
           tags: |
             ghcr.io/relational-network/relational-sdk:sha-${{ github.sha }}
             ${{ github.ref == 'refs/heads/staging' && 'ghcr.io/relational-network/relational-sdk:staging-latest' || '' }}
-            ${{ github.ref == 'refs/heads/main' && 'ghcr.io/relational-network/relational-sdk:latest' || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           secret-files: |

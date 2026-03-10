@@ -218,6 +218,20 @@ pub async fn parse_events_from_signature(
     rpc: &solana_client::nonblocking::rpc_client::RpcClient,
     signature_str: &str,
 ) -> Result<Vec<DrtEvent>, crate::error::ApiError> {
+    parse_events_from_signature_with_commitment(
+        rpc,
+        signature_str,
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    )
+    .await
+}
+
+/// Fetch and parse DRT events at a specific commitment level.
+pub async fn parse_events_from_signature_with_commitment(
+    rpc: &solana_client::nonblocking::rpc_client::RpcClient,
+    signature_str: &str,
+    commitment: solana_commitment_config::CommitmentConfig,
+) -> Result<Vec<DrtEvent>, crate::error::ApiError> {
     use solana_sdk::signature::Signature;
     use solana_transaction_status::UiTransactionEncoding;
     use std::str::FromStr;
@@ -227,7 +241,7 @@ pub async fn parse_events_from_signature(
 
     let config = solana_client::rpc_config::RpcTransactionConfig {
         encoding: Some(UiTransactionEncoding::Json),
-        commitment: Some(solana_commitment_config::CommitmentConfig::confirmed()),
+        commitment: Some(commitment),
         max_supported_transaction_version: Some(0),
     };
 

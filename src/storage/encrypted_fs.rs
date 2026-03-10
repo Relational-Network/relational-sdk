@@ -25,9 +25,6 @@ pub enum StorageError {
     NotFound(String),
     /// Resource already exists (e.g., duplicate wallet ID).
     AlreadyExists(String),
-    /// Storage has not been initialized (directories missing).
-    #[allow(dead_code)]
-    NotInitialized,
     /// Owner mismatch — caller does not own the resource.
     PermissionDenied { user_id: String, resource: String },
 }
@@ -39,7 +36,6 @@ impl std::fmt::Display for StorageError {
             Self::Json(e) => write!(f, "JSON error: {e}"),
             Self::NotFound(r) => write!(f, "not found: {r}"),
             Self::AlreadyExists(r) => write!(f, "already exists: {r}"),
-            Self::NotInitialized => write!(f, "storage not initialized"),
             Self::PermissionDenied { user_id, resource } => {
                 write!(f, "user {user_id} denied access to {resource}")
             }
@@ -67,7 +63,6 @@ impl From<StorageError> for crate::error::ApiError {
         match &e {
             StorageError::NotFound(msg) => Self::not_found(msg.clone()),
             StorageError::AlreadyExists(msg) => Self::conflict(msg.clone()),
-            StorageError::NotInitialized => Self::service_unavailable("storage not initialized"),
             StorageError::PermissionDenied { .. } => {
                 tracing::warn!("{e}");
                 Self::forbidden("you do not own this resource")
@@ -89,7 +84,6 @@ pub type StorageResult<T> = Result<T, StorageError>;
 /// block layer transparently.
 pub struct EncryptedStorage {
     paths: StoragePaths,
-    initialized: bool,
 }
 
 impl EncryptedStorage {
@@ -97,7 +91,6 @@ impl EncryptedStorage {
     pub fn new(data_dir: &str) -> Self {
         Self {
             paths: StoragePaths::new(data_dir),
-            initialized: false,
         }
     }
 
@@ -108,14 +101,7 @@ impl EncryptedStorage {
             fs::create_dir_all(dir)?;
             debug!(path = %dir.display(), "Ensured storage directory");
         }
-        self.initialized = true;
         Ok(())
-    }
-
-    /// Whether [`initialize`](Self::initialize) has been called.
-    #[allow(dead_code)]
-    pub fn is_initialized(&self) -> bool {
-        self.initialized
     }
 
     /// Return a reference to the underlying path helpers.

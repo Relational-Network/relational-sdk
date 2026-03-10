@@ -8,6 +8,7 @@
 
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use super::types::{ASSOCIATED_TOKEN_PROGRAM_ID_STR, TOKEN_2022_PROGRAM_ID_STR};
 use crate::config::drt_program_id;
@@ -46,26 +47,34 @@ pub fn derive_extra_metas_pda(mint: &Pubkey) -> (Pubkey, u8) {
 ///
 /// This is a Token-2022 ATA: `seeds = [pool, TOKEN_2022_PROGRAM, mint]` under ATA program.
 pub fn derive_vault_ata(pool: &Pubkey, mint: &Pubkey) -> Pubkey {
-    let token_program =
-        Pubkey::from_str(TOKEN_2022_PROGRAM_ID_STR).expect("valid Token-2022 program ID");
-    let ata_program =
-        Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID_STR).expect("valid ATA program ID");
+    static TOKEN_PROGRAM: OnceLock<Pubkey> = OnceLock::new();
+    static ATA_PROGRAM: OnceLock<Pubkey> = OnceLock::new();
+    let token_program = TOKEN_PROGRAM.get_or_init(|| {
+        Pubkey::from_str(TOKEN_2022_PROGRAM_ID_STR).expect("valid Token-2022 program ID")
+    });
+    let ata_program = ATA_PROGRAM.get_or_init(|| {
+        Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID_STR).expect("valid ATA program ID")
+    });
     Pubkey::find_program_address(
         &[pool.as_ref(), token_program.as_ref(), mint.as_ref()],
-        &ata_program,
+        ata_program,
     )
     .0
 }
 
 /// Derive a user's ATA for a Token-2022 mint.
 pub fn derive_user_ata(user: &Pubkey, mint: &Pubkey) -> Pubkey {
-    let token_program =
-        Pubkey::from_str(TOKEN_2022_PROGRAM_ID_STR).expect("valid Token-2022 program ID");
-    let ata_program =
-        Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID_STR).expect("valid ATA program ID");
+    static TOKEN_PROGRAM: OnceLock<Pubkey> = OnceLock::new();
+    static ATA_PROGRAM: OnceLock<Pubkey> = OnceLock::new();
+    let token_program = TOKEN_PROGRAM.get_or_init(|| {
+        Pubkey::from_str(TOKEN_2022_PROGRAM_ID_STR).expect("valid Token-2022 program ID")
+    });
+    let ata_program = ATA_PROGRAM.get_or_init(|| {
+        Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID_STR).expect("valid ATA program ID")
+    });
     Pubkey::find_program_address(
         &[user.as_ref(), token_program.as_ref(), mint.as_ref()],
-        &ata_program,
+        ata_program,
     )
     .0
 }

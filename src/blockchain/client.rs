@@ -4,6 +4,7 @@
 //! Thin wrapper around [`RpcClient`] for common Solana queries.
 
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use tracing::debug;
@@ -12,6 +13,10 @@ use super::types::{NetworkConfig, TokenBalance};
 use crate::error::ApiError;
 
 /// Async Solana RPC client wrapper.
+///
+/// Uses `confirmed` commitment (single confirmation, ~400ms) instead of
+/// `finalized` (32 confirmations, ~15-30s).  This is safe for reads and
+/// virtually all DRT operations on devnet/mainnet.
 pub struct SolanaClient {
     pub(crate) rpc: RpcClient,
     pub(crate) network: NetworkConfig,
@@ -19,9 +24,11 @@ pub struct SolanaClient {
 
 impl SolanaClient {
     /// Create a new client for the given RPC URL and network.
+    ///
+    /// Defaults to `confirmed` commitment for fast transaction confirmation.
     pub fn new(rpc_url: &str, network: NetworkConfig) -> Self {
         Self {
-            rpc: RpcClient::new(rpc_url.to_string()),
+            rpc: RpcClient::new_with_commitment(rpc_url.to_string(), CommitmentConfig::confirmed()),
             network,
         }
     }

@@ -28,13 +28,13 @@ use crate::audit_log;
 use crate::auth::UserToken;
 use crate::blockchain::drt::{
     accounts::{fetch_pool, find_drt_in_pool},
-    events::{parse_events_from_signature, DrtEvent},
+    events::{parse_events_from_signature, parse_events_from_signature_with_commitment, DrtEvent},
     instructions::{build_buy_drt, build_close_pool, build_create_pool_atomic, build_redeem_drt},
     pda::{derive_mint_pda, derive_pool_pda, derive_user_ata, derive_vault_ata},
     types::*,
     validation::validate_create_pool_request,
 };
-use crate::blockchain::signing::keypair_from_bytes;
+use crate::blockchain::signing::keypair_from_bytes_verified;
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage::audit::AuditEventType;
@@ -63,16 +63,25 @@ fn load_wallet_keypair(
     }
 
     let keypair_bytes = repo.read_keypair(wallet_id)?;
-    let keypair = keypair_from_bytes(&keypair_bytes)?;
+    let keypair = keypair_from_bytes_verified(&keypair_bytes, &wallet.public_address)?;
     Ok((wallet, keypair))
 }
 
 /// Sign and send a transaction, returning the signature string + events.
+///
+/// `commitment` controls how long we wait before reading the tx:
+/// - `confirmed` (~400ms-2s): single validator confirmation — fast, suitable for
+///   create/buy/close where the UI just needs to know the tx landed.
+/// - `finalized` (~15-30s): 32 confirmations — required for redeem because the
+///   emitted event gates irreversible enclave execution.
 async fn sign_send_and_parse(
     state: &AppState,
     keypair: &Keypair,
     instructions: Vec<solana_sdk::instruction::Instruction>,
+    commitment: solana_commitment_config::CommitmentConfig,
 ) -> Result<(String, Vec<DrtEvent>), ApiError> {
+    use solana_commitment_config::CommitmentConfig;
+
     let rpc = state.solana_client.rpc();
     let recent_blockhash = rpc
         .get_latest_blockhash()
@@ -82,15 +91,44 @@ async fn sign_send_and_parse(
     let message = solana_message::Message::new(&instructions, Some(&keypair.pubkey()));
     let tx = solana_transaction::Transaction::new(&[keypair], message, recent_blockhash);
 
+    // Send without blocking on any confirmation level.
     let signature = rpc
-        .send_and_confirm_transaction(&tx)
+        .send_transaction(&tx)
         .await
-        .map_err(|e| ApiError::service_unavailable(format!("transaction failed: {e}")))?;
+        .map_err(|e| ApiError::service_unavailable(format!("transaction send failed: {e}")))?;
+
+    // Poll until the requested commitment level is reached.
+    let timeout = if commitment == CommitmentConfig::finalized() {
+        std::time::Duration::from_secs(60)
+    } else {
+        std::time::Duration::from_secs(30)
+    };
+    let poll_interval = if commitment == CommitmentConfig::finalized() {
+        std::time::Duration::from_millis(1000)
+    } else {
+        std::time::Duration::from_millis(400)
+    };
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > timeout {
+            return Err(ApiError::service_unavailable(format!(
+                "transaction confirmation timed out ({timeout:?}) at {:?}",
+                commitment.commitment
+            )));
+        }
+        match rpc
+            .confirm_transaction_with_commitment(&signature, commitment)
+            .await
+        {
+            Ok(resp) if resp.value => break,
+            _ => tokio::time::sleep(poll_interval).await,
+        }
+    }
 
     let sig_str = signature.to_string();
 
-    // Fetch tx to parse events.
-    let events = parse_events_from_signature(rpc, &sig_str)
+    // Fetch tx to parse events (use same commitment for consistency).
+    let events = parse_events_from_signature_with_commitment(rpc, &sig_str, commitment)
         .await
         .unwrap_or_default();
 
@@ -147,8 +185,15 @@ pub async fn create_pool(
 
     // Build and send transaction.
     let instructions =
-        build_create_pool_atomic(&owner, &pool_pda, &payload.pool_name, &drt_configs);
-    let (sig_str, _events) = sign_send_and_parse(&state, &keypair, instructions).await?;
+        build_create_pool_atomic(&owner, &pool_pda, &payload.pool_name, &drt_configs)
+            .map_err(ApiError::internal)?;
+    let (sig_str, _events) = sign_send_and_parse(
+        &state,
+        &keypair,
+        instructions,
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    )
+    .await?;
 
     info!(
         signature = %sig_str,
@@ -301,9 +346,16 @@ pub async fn buy_drt(
         payload.amount,
         &drt.mint,
         drt.enable_transfer_hook,
-    );
+    )
+    .map_err(ApiError::internal)?;
 
-    let (sig_str, events) = sign_send_and_parse(&state, &keypair, vec![ix]).await?;
+    let (sig_str, events) = sign_send_and_parse(
+        &state,
+        &keypair,
+        vec![ix],
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    )
+    .await?;
 
     // Find purchased event.
     let purchased_event = events.iter().find_map(|e| {
@@ -383,9 +435,18 @@ pub async fn redeem_drt(
     let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
     let drt = find_drt_in_pool(&pool, &payload.drt_type)?;
 
-    let ix = build_redeem_drt(&pool_pda, &keypair.pubkey(), &payload.drt_type, &drt.mint);
+    let ix = build_redeem_drt(&pool_pda, &keypair.pubkey(), &payload.drt_type, &drt.mint)
+        .map_err(ApiError::internal)?;
 
-    let (sig_str, events) = sign_send_and_parse(&state, &keypair, vec![ix]).await?;
+    // Redeem requires `finalized` — the emitted event gates irreversible
+    // enclave execution (code fetch + hash verify + run on data).
+    let (sig_str, events) = sign_send_and_parse(
+        &state,
+        &keypair,
+        vec![ix],
+        solana_commitment_config::CommitmentConfig::finalized(),
+    )
+    .await?;
 
     // Find redeem event (DrtRedeemed or AppendRedeemed).
     let redeem_event = events.iter().find_map(|e| match e {
@@ -471,7 +532,13 @@ pub async fn close_pool(
     }
 
     let ix = build_close_pool(&pool_pda, &owner, &pool.drts);
-    let (sig_str, _events) = sign_send_and_parse(&state, &keypair, vec![ix]).await?;
+    let (sig_str, _events) = sign_send_and_parse(
+        &state,
+        &keypair,
+        vec![ix],
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    )
+    .await?;
 
     info!(
         signature = %sig_str,

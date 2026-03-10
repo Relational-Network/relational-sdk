@@ -24,11 +24,11 @@
 //!     port: 8080
 //! ```
 
-use axum::{http::StatusCode, Json};
+use axum::{extract::State, http::StatusCode, Json};
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use crate::config::DATA_DIR_ENV;
+use crate::state::AppState;
 
 /// Health check response with individual component status.
 #[derive(Debug, Serialize, ToSchema)]
@@ -47,6 +47,15 @@ pub struct HealthChecks {
     /// Data directory availability (if configured).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
+    /// Solana RPC reachability (readiness only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub solana_rpc: Option<String>,
+    /// AVS JWKS cache status (readiness only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks: Option<String>,
+    /// Transaction database (redb) status (readiness only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_db: Option<String>,
 }
 
 /// Simple health check response for liveness probes.
@@ -58,14 +67,11 @@ pub struct HealthResponse {
 /// Check if the data directory exists and is accessible.
 /// Uses async I/O to avoid blocking the Tokio runtime.
 async fn check_data_dir() -> Option<String> {
-    if let Ok(dir) = std::env::var(DATA_DIR_ENV) {
-        // Use async filesystem check to avoid blocking
-        match tokio::fs::metadata(&dir).await {
-            Ok(_) => Some("ok".to_string()),
-            Err(_) => Some("missing".to_string()),
-        }
-    } else {
-        None // Not configured, don't report.
+    // Hardcoded — the encrypted FS is always mounted at DATA_DIR.
+    let dir = crate::config::DATA_DIR;
+    match tokio::fs::metadata(dir).await {
+        Ok(_) => Some("ok".to_string()),
+        Err(_) => Some("missing".to_string()),
     }
 }
 
@@ -92,6 +98,9 @@ pub async fn health() -> (StatusCode, Json<ReadyResponse>) {
         checks: HealthChecks {
             service: "ok".to_string(),
             data_dir,
+            solana_rpc: None,
+            jwks: None,
+            tx_db: None,
         },
     };
 
@@ -139,6 +148,52 @@ pub async fn liveness() -> Json<HealthResponse> {
         (status = 503, description = "Service is not ready", body = ReadyResponse)
     )
 )]
-pub async fn readiness() -> (StatusCode, Json<ReadyResponse>) {
-    health().await
+pub async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<ReadyResponse>) {
+    let data_dir = check_data_dir().await;
+
+    // Check Solana RPC by calling a lightweight getHealth.
+    let solana_rpc = match state.solana_client.rpc().get_health().await {
+        Ok(()) => "ok".to_string(),
+        Err(e) => format!("error: {e}"),
+    };
+
+    // Check JWKS cache has been populated at least once.
+    let jwks = {
+        let guard = state.jwks_cache.read().await;
+        if guard.is_some() {
+            "ok".to_string()
+        } else {
+            "not_loaded".to_string()
+        }
+    };
+
+    // Check redb by opening a read transaction.
+    let tx_db = match state.tx_db.begin_read_txn() {
+        Ok(_) => "ok".to_string(),
+        Err(e) => format!("error: {e}"),
+    };
+
+    let all_ok = data_dir.as_ref().map(|s| s == "ok").unwrap_or(true)
+        && solana_rpc == "ok"
+        && jwks == "ok"
+        && tx_db == "ok";
+
+    let response = ReadyResponse {
+        status: if all_ok { "ok" } else { "degraded" }.to_string(),
+        checks: HealthChecks {
+            service: "ok".to_string(),
+            data_dir,
+            solana_rpc: Some(solana_rpc),
+            jwks: Some(jwks),
+            tx_db: Some(tx_db),
+        },
+    };
+
+    let status = if all_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (status, Json(response))
 }

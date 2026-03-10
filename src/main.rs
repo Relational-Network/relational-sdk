@@ -40,12 +40,14 @@ mod tls;
 
 use axum::{
     extract::DefaultBodyLimit,
+    http::{header, HeaderValue},
     routing::{get, post},
     Router,
 };
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
-use tracing::info;
+use tower_http::set_header::SetResponseHeaderLayer;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
 use utoipa_swagger_ui::SwaggerUi;
@@ -54,6 +56,9 @@ use config::{
     avs_jwks_url, AVS_AUDIENCE, DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH, MAX_BODY_SIZE,
     SERVER_HOST, SERVER_PORT,
 };
+
+// NOTE: CORS is handled by the Caddy reverse proxy (relational-proxy), not here.
+// The enclave only listens on localhost; browsers never connect directly.
 use crypto::enclave_key;
 use handlers::{
     admin_status, data_query, data_upload, data_upload_file, data_validate, get_public_key,
@@ -268,8 +273,8 @@ async fn main() {
     let _ = enclave_key();
 
     // Initialize encrypted storage.
-    let data_dir = config::data_dir();
-    let mut encrypted_storage = storage::EncryptedStorage::new(&data_dir);
+    let data_dir = config::DATA_DIR;
+    let mut encrypted_storage = storage::EncryptedStorage::new(data_dir);
     match encrypted_storage.initialize() {
         Ok(()) => info!(data_dir = %data_dir, "Encrypted storage initialized"),
         Err(e) => {
@@ -280,6 +285,46 @@ async fn main() {
 
     info!(jwks_url = %avs_jwks_url(), "JWT validation enabled");
 
+    // Log DRT program ID at startup.
+    info!(drt_program_id = %config::DRT_PROGRAM_ID_STR, "DRT program ID");
+
+    // Warn if JWKS URL is plain HTTP pointing at a remote host (not loopback/localhost).
+    // In production the AVS must be behind TLS; accepting plain HTTP leaks attestation tokens.
+    {
+        let url = avs_jwks_url();
+        if url.starts_with("http://") {
+            let is_local = url.contains("127.0.0.1") || url.contains("localhost");
+            if !is_local {
+                tracing::error!(
+                    jwks_url = %url,
+                    "JWKS URL uses plain HTTP for a remote host — \
+                     attestation tokens will travel unencrypted. \
+                     Set AVS_JWKS_URL to an https:// endpoint in production."
+                );
+            } else {
+                tracing::warn!(
+                    jwks_url = %url,
+                    "JWKS URL is plain HTTP (loopback) — acceptable for local dev only"
+                );
+            }
+        }
+    }
+
+    // Hard-block: refuse to start when non-local HTTP JWKS unless ALLOW_HTTP_JWKS is true.
+    {
+        let url = avs_jwks_url();
+        if url.starts_with("http://") {
+            let is_local = url.contains("127.0.0.1") || url.contains("localhost");
+            if !is_local && !config::ALLOW_HTTP_JWKS {
+                panic!(
+                    "AVS_JWKS_URL is plain HTTP for a remote host: {url}. \
+                     Set AVS_JWKS_URL to an https:// endpoint, or flip config::ALLOW_HTTP_JWKS \
+                     and rebuild."
+                );
+            }
+        }
+    }
+
     // Initialize Solana client.
     let network_config = blockchain::types::network_config_from_env();
     info!(network = %network_config.name, rpc = %network_config.rpc_url, "Solana client initialized");
@@ -288,7 +333,7 @@ async fn main() {
 
     // Initialize transaction database (redb). Required — fail fast if it cannot open.
     let tx_db = Arc::new(
-        storage::tx_database::TxDatabase::open(&storage::StoragePaths::new(&data_dir).tx_db_path())
+        storage::tx_database::TxDatabase::open(&storage::StoragePaths::new(data_dir).tx_db_path())
             .expect("Failed to open transaction database — cannot start enclave without DB"),
     );
     info!("Transaction database opened");
@@ -302,7 +347,7 @@ async fn main() {
     // Create shared application state.
     let state = AppState {
         audience: AVS_AUDIENCE.to_string(),
-        jwks_cache: Arc::new(RwLock::new(None)),
+        jwks_cache: Arc::new(tokio::sync::RwLock::new(None)),
         storage: Arc::new(encrypted_storage),
         solana_client: Arc::new(solana_client),
         tx_db,
@@ -321,6 +366,31 @@ async fn main() {
         );
     } else {
         info!("Transaction indexer disabled; using on-demand API sync");
+    }
+
+    // Spawn background nonce purge task to prevent unbounded growth of the
+    // replay-protection table.  Runs every NONCE_PURGE_INTERVAL_SECS.
+    {
+        let tx_db = state.tx_db.clone();
+        let interval = std::time::Duration::from_secs(config::NONCE_PURGE_INTERVAL_SECS);
+        let max_age = config::NONCE_MAX_AGE_SECS;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await; // first tick is immediate — skip it
+            loop {
+                ticker.tick().await;
+                match tx_db.purge_expired_nonces(max_age) {
+                    Ok(n) if n > 0 => info!(removed = n, "Purged expired nonces"),
+                    Ok(_) => {}
+                    Err(e) => warn!(error = %e, "Nonce purge failed"),
+                }
+            }
+        });
+        info!(
+            interval_secs = config::NONCE_PURGE_INTERVAL_SECS,
+            max_age_secs = config::NONCE_MAX_AGE_SECS,
+            "Nonce purge background task started"
+        );
     }
 
     // Build the router with all endpoints.
@@ -345,6 +415,18 @@ async fn main() {
         // OpenAPI documentation.
         .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
         .with_state(state);
 
     // Bind on all interfaces for VM access.
@@ -364,12 +446,47 @@ async fn main() {
             .await
             .expect("failed to load TLS cert/key");
 
-        // Start HTTPS server.
+        // Graceful shutdown: drain in-flight requests on SIGTERM/SIGINT.
+        let handle = axum_server::Handle::new();
+        let shutdown_handle = handle.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            info!("Shutdown signal received, draining connections (10s)...");
+            shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+        });
+
+        // Start HTTPS server with graceful shutdown support.
         axum_server::bind_rustls(addr, tls_config)
+            .handle(handle)
             .serve(app.into_make_service())
             .await
             .expect("server error");
     } else {
         panic!("TLS cert/key not available; RA-TLS requires TLS");
+    }
+}
+
+/// Wait for SIGINT (Ctrl-C) or SIGTERM for clean Kubernetes/systemd shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install SIGINT handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
 }

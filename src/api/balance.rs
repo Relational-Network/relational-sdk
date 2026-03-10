@@ -17,8 +17,9 @@ use crate::auth::UserToken;
 use crate::blockchain::types::TokenBalance;
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::storage::ownership::OwnershipEnforcer;
-use crate::storage::repository::wallets::{WalletRepository, WalletStatus};
+use crate::storage::repository::wallets::WalletRepository;
+
+use super::enforce_owner_active;
 
 // ============================================================================
 // Response types
@@ -127,29 +128,4 @@ pub async fn get_native_balance(
         address: wallet.public_address,
         balance,
     }))
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/// Check that the caller owns the wallet and the wallet is not deleted.
-fn enforce_owner_active(
-    wallet: &crate::storage::repository::wallets::WalletMetadata,
-    caller_sub: &str,
-) -> Result<(), ApiError> {
-    wallet.verify_ownership(caller_sub)?;
-    if wallet.status == WalletStatus::Deleted {
-        return Err(ApiError::not_found(format!(
-            "wallet {} not found",
-            wallet.wallet_id
-        )));
-    }
-    if wallet.status == WalletStatus::Suspended {
-        return Err(ApiError::forbidden(format!(
-            "wallet {} is suspended",
-            wallet.wallet_id
-        )));
-    }
-    Ok(())
 }

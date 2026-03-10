@@ -19,7 +19,33 @@ use axum::{
     Router,
 };
 
+use crate::error::ApiError;
 use crate::state::AppState;
+use crate::storage::ownership::OwnershipEnforcer;
+use crate::storage::repository::wallets::{WalletMetadata, WalletStatus};
+
+/// Check that the caller owns the wallet and the wallet is not deleted/suspended.
+///
+/// Shared helper used by balance, transaction, and other wallet-scoped endpoints.
+pub(crate) fn enforce_owner_active(
+    wallet: &WalletMetadata,
+    caller_sub: &str,
+) -> Result<(), ApiError> {
+    wallet.verify_ownership(caller_sub)?;
+    if wallet.status == WalletStatus::Deleted {
+        return Err(ApiError::not_found(format!(
+            "wallet {} not found",
+            wallet.wallet_id
+        )));
+    }
+    if wallet.status == WalletStatus::Suspended {
+        return Err(ApiError::forbidden(format!(
+            "wallet {} is suspended",
+            wallet.wallet_id
+        )));
+    }
+    Ok(())
+}
 
 /// Build the wallet-service routes (nested under `/v1`).
 pub fn wallet_router() -> Router<AppState> {
