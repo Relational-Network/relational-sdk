@@ -35,6 +35,9 @@ pub struct PoolMetadata {
     pub pool_name: String,
     /// Wallet ID of the pool owner (enclave-side wallet, not Solana pubkey).
     pub owner_wallet_id: String,
+    /// Solana public key of the pool owner (base58). Used for marketplace display.
+    #[serde(default)]
+    pub owner_pubkey: Option<String>,
     /// Schema used for CSV validation (e.g., `"pilot_v1"`).
     pub schema_id: String,
     /// Current lifecycle state.

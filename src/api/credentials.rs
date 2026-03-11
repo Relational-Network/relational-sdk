@@ -10,6 +10,8 @@
 //! - `GET  /v1/drt/pools/{pool_pda}/audit`      — pool-scoped audit log
 //! - `GET  /v1/drt/pools/{pool_pda}/summary`    — pool metadata + on-chain state
 //! - `GET  /v1/drt/pools/by-wallet/{wallet_id}` — list pools owned by wallet
+//! - `GET  /v1/drt/pools`                       — list all pools (marketplace discovery)
+//! - `GET  /v1/drt/pools/{pool_pda}/issuance-log` — list per-issuance records
 
 use axum::{
     extract::{Multipart, Path, Query, State},
@@ -178,6 +180,85 @@ pub struct PoolsByWalletResponse {
     pub pools: Vec<PoolListEntry>,
 }
 
+/// DRT entry for marketplace listing (compact, no mint/hash details).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MarketplaceDrtEntry {
+    pub drt_type: String,
+    pub supply: u64,
+    pub cost: u64,
+}
+
+/// Pool entry for the marketplace "browse all" listing.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MarketplacePoolEntry {
+    pub pool_pda: String,
+    pub pool_name: String,
+    pub owner: String,
+    pub schema_id: String,
+    pub state: String,
+    pub total_credentials: u64,
+    pub revoked_count: u64,
+    pub created_at: String,
+    pub drt_count: usize,
+    pub drts: Vec<MarketplaceDrtEntry>,
+}
+
+/// Response for listing all pools (marketplace discovery).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AllPoolsResponse {
+    pub pools: Vec<MarketplacePoolEntry>,
+    pub total: u64,
+    pub limit: u64,
+    pub offset: u64,
+}
+
+/// Query parameters for the list-all-pools endpoint.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct ListAllPoolsQuery {
+    /// Filter by pool state: `ready` or `needs_init`.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Case-insensitive search on pool name.
+    #[serde(default)]
+    pub search: Option<String>,
+    /// Sort order: `created_desc` (default), `created_asc`, `name_asc`, `credentials_desc`.
+    #[serde(default = "default_sort")]
+    pub sort: String,
+    /// Page size (default 50, max 100).
+    #[serde(default = "default_limit_u64")]
+    pub limit: u64,
+    /// Pagination offset.
+    #[serde(default)]
+    pub offset: u64,
+}
+
+fn default_sort() -> String {
+    "created_desc".to_string()
+}
+
+fn default_limit_u64() -> u64 {
+    50
+}
+
+/// Single issuance record in the issuance log.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IssuanceRecord {
+    pub record_id: String,
+    pub uploaded_by: String,
+    pub rows: u64,
+    pub uploaded_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redeem_tx_signature: Option<String>,
+}
+
+/// Response for the issuance log endpoint.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IssuanceLogResponse {
+    pub pool_pda: String,
+    pub records: Vec<IssuanceRecord>,
+    pub total: usize,
+}
+
 /// Metadata for a stored credential dataset file.
 #[derive(Debug, Serialize, Deserialize)]
 struct DatasetFileMeta {
@@ -316,6 +397,7 @@ pub async fn initialize_pool(
                 pool_pda: pool_pda_str.clone(),
                 pool_name: pool.name.clone(),
                 owner_wallet_id: wallet.wallet_id.clone(),
+                owner_pubkey: Some(wallet.public_address.clone()),
                 schema_id: parsed.schema_id.clone(),
                 state: PoolState::NeedsInit,
                 created_onchain_at: Utc::now(),
@@ -825,28 +907,16 @@ pub async fn pool_audit(
     while current <= end_date {
         let date_str = current.format("%Y-%m-%d").to_string();
         let events = audit.read_verified_events(&date_str);
-        // Filter events that reference this pool.
         for event in events {
             if event.resource_id.as_deref() == Some(&pool_pda_str) {
                 all_events.push(event);
             }
         }
-        current = current.succ_opt().unwrap_or(end_date);
-        if current == end_date && start_date != end_date {
-            // Include end date.
-            let date_str = current.format("%Y-%m-%d").to_string();
-            let events = audit.read_verified_events(&date_str);
-            for event in events {
-                if event.resource_id.as_deref() == Some(&pool_pda_str) {
-                    all_events.push(event);
-                }
-            }
-            break;
-        }
+        current = match current.succ_opt() {
+            Some(next) => next,
+            None => break,
+        };
     }
-
-    // Deduplicate (the loop above might scan end_date twice).
-    all_events.dedup_by(|a, b| a.event_id == b.event_id);
 
     let total = all_events.len();
 
@@ -998,5 +1068,203 @@ pub async fn list_pools_by_wallet(
     Ok(Json(PoolsByWalletResponse {
         wallet_id,
         pools,
+    }))
+}
+
+/// List all pools managed by the enclave (marketplace discovery).
+///
+/// Scans `/data/pools/` and returns all pools with optional filtering,
+/// search, sorting, and pagination. Accessible by any authenticated user.
+#[utoipa::path(
+    get,
+    path = "/v1/drt/pools",
+    tag = "Credentials",
+    summary = "List all pools",
+    description = "Browse all credential pools managed by the enclave. Supports filtering by state, search by name, sorting, and pagination.",
+    security(("bearer_auth" = [])),
+    params(ListAllPoolsQuery),
+    responses(
+        (status = 200, description = "Pool list", body = AllPoolsResponse),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
+pub async fn list_all_pools(
+    crate::auth::ReadOnlyToken(_token): crate::auth::ReadOnlyToken,
+    State(state): State<AppState>,
+    Query(query): Query<ListAllPoolsQuery>,
+) -> Result<Json<AllPoolsResponse>, ApiError> {
+    let pools_dir = state.storage.paths().pools_dir();
+    let pool_dirs = match state.storage.list_dirs(&pools_dir) {
+        Ok(dirs) => dirs,
+        Err(_) => Vec::new(),
+    };
+
+    let mut entries: Vec<MarketplacePoolEntry> = Vec::new();
+    for pda in pool_dirs {
+        let meta_path = state.storage.paths().pool_meta(&pda);
+        let meta = match state.storage.read_json::<PoolMetadata>(&meta_path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let state_str = match meta.state {
+            PoolState::NeedsInit => "needs_init",
+            PoolState::Ready => "ready",
+        };
+
+        // Apply state filter.
+        if let Some(ref filter_state) = query.state {
+            if state_str != filter_state.as_str() {
+                continue;
+            }
+        }
+
+        // Apply search filter (case-insensitive on pool name).
+        if let Some(ref search) = query.search {
+            if !meta.pool_name.to_lowercase().contains(&search.to_lowercase()) {
+                continue;
+            }
+        }
+
+        // Resolve owner pubkey: use stored value or fall back to "unknown".
+        let owner = meta.owner_pubkey.clone().unwrap_or_else(|| "unknown".to_string());
+
+        // Read on-chain DRT configs from pool metadata directory.
+        // We don't fetch from chain here (expensive); instead build from
+        // the on-chain data we fetched at pool creation time.
+        // For MVP, fetch live from chain for DRT data.
+        let pool_drts = match fetch_pool(
+            state.solana_client.rpc(),
+            &Pubkey::from_str(&meta.pool_pda).unwrap_or_default(),
+        )
+        .await
+        {
+            Ok(pool) => pool
+                .drts
+                .iter()
+                .map(|d| MarketplaceDrtEntry {
+                    drt_type: d.drt_type.clone(),
+                    supply: d.supply,
+                    cost: d.cost,
+                })
+                .collect::<Vec<_>>(),
+            Err(_) => Vec::new(),
+        };
+
+        let drt_count = pool_drts.len();
+
+        entries.push(MarketplacePoolEntry {
+            pool_pda: meta.pool_pda,
+            pool_name: meta.pool_name,
+            owner,
+            schema_id: meta.schema_id,
+            state: state_str.to_string(),
+            total_credentials: meta.total_credentials,
+            revoked_count: meta.revoked_count,
+            created_at: meta.created_onchain_at.to_rfc3339(),
+            drt_count,
+            drts: pool_drts,
+        });
+    }
+
+    // Sort.
+    match query.sort.as_str() {
+        "created_asc" => entries.sort_by(|a, b| a.created_at.cmp(&b.created_at)),
+        "name_asc" => entries.sort_by(|a, b| a.pool_name.to_lowercase().cmp(&b.pool_name.to_lowercase())),
+        "credentials_desc" => entries.sort_by(|a, b| b.total_credentials.cmp(&a.total_credentials)),
+        _ => entries.sort_by(|a, b| b.created_at.cmp(&a.created_at)), // created_desc
+    }
+
+    let total = entries.len() as u64;
+    let limit = query.limit.min(100);
+    let offset = query.offset.min(total);
+    let page: Vec<MarketplacePoolEntry> = entries
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect();
+
+    Ok(Json(AllPoolsResponse {
+        pools: page,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+/// List per-issuance records for a pool (issuance log).
+///
+/// Scans the pool's dataset directory for `*.meta.json` files and returns
+/// each upload record with row count, uploader, timestamp, and tx signature.
+/// Includes the initial dataset record.
+#[utoipa::path(
+    get,
+    path = "/v1/drt/pools/{pool_pda}/issuance-log",
+    tag = "Credentials",
+    summary = "Pool issuance log",
+    description = "List all credential issuance records for a pool, including the initial dataset. Admin only (pool owner).",
+    security(("bearer_auth" = [])),
+    params(
+        ("pool_pda" = String, Path, description = "Pool PDA address (base58)"),
+    ),
+    responses(
+        (status = 200, description = "Issuance log", body = IssuanceLogResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not pool owner"),
+        (status = 404, description = "Pool not found"),
+    )
+)]
+pub async fn get_issuance_log(
+    AdminToken(token): AdminToken,
+    State(state): State<AppState>,
+    Path(pool_pda_str): Path<String>,
+) -> Result<Json<IssuanceLogResponse>, ApiError> {
+    let pool_pda = Pubkey::from_str(&pool_pda_str)
+        .map_err(|_| ApiError::bad_request("invalid pool PDA address"))?;
+
+    // Verify ownership.
+    let repo = WalletRepository::new(&state.storage);
+    let wallets = repo.list_by_owner(&token.sub)?;
+    let wallet = wallets
+        .iter()
+        .find(|w| w.status == WalletStatus::Active)
+        .ok_or_else(|| ApiError::bad_request("no active wallet found"))?;
+
+    let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
+    verify_pool_ownership(&pool, wallet)?;
+
+    // Scan dataset directory for *.meta.json files.
+    let dataset_dir = state.storage.paths().pool_dataset_dir(&pool_pda_str);
+    let mut records: Vec<IssuanceRecord> = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&dataset_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.ends_with(".meta.json") {
+                continue;
+            }
+
+            if let Ok(file_meta) = state.storage.read_json::<DatasetFileMeta>(&path) {
+                records.push(IssuanceRecord {
+                    record_id: file_meta.record_id,
+                    uploaded_by: file_meta.uploaded_by,
+                    rows: file_meta.rows,
+                    uploaded_at: file_meta.uploaded_at,
+                    redeem_tx_signature: file_meta.redeem_tx_signature,
+                });
+            }
+        }
+    }
+
+    // Sort by uploaded_at descending (newest first).
+    records.sort_by(|a, b| b.uploaded_at.cmp(&a.uploaded_at));
+
+    let total = records.len();
+
+    Ok(Json(IssuanceLogResponse {
+        pool_pda: pool_pda_str,
+        records,
+        total,
     }))
 }

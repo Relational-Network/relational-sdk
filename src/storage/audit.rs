@@ -8,8 +8,11 @@
 //! An HMAC-SHA256 tag is computed over each event's canonical JSON so that
 //! any post-hoc modification of the log file is detectable.
 
+use std::sync::OnceLock;
+
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::io::AsyncWriteExt;
@@ -60,13 +63,41 @@ pub struct AuditEvent {
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Derive a 32-byte HMAC key from the enclave's P-256 **private** scalar via HKDF.
+/// Stable 32-byte HMAC key, persisted at `/data/audit/.hmac-key`.
 ///
-/// The private key material never leaves the process — `EnclaveKey::hmac_key()`
-/// performs the HKDF derivation internally and returns only the purpose-bound
-/// output key.
+/// On first call the key is loaded from disk (or generated and saved if the
+/// file does not yet exist).  The result is cached for the lifetime of the
+/// process so the file is read at most once.
+static AUDIT_HMAC_KEY: OnceLock<[u8; 32]> = OnceLock::new();
+
 fn audit_hmac_key() -> [u8; 32] {
-    crate::crypto::enclave_key().hmac_key(b"audit-hmac-v1")
+    *AUDIT_HMAC_KEY.get_or_init(|| {
+        let key_path = std::path::Path::new(crate::config::DATA_DIR)
+            .join("audit")
+            .join(".hmac-key");
+
+        // Try to read an existing key.
+        if let Ok(bytes) = std::fs::read(&key_path) {
+            if bytes.len() == 32 {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&bytes);
+                return key;
+            }
+            warn!("Corrupt audit HMAC key file ({} bytes) — regenerating", bytes.len());
+        }
+
+        // Generate a fresh key and persist it.
+        let mut key = [0u8; 32];
+        OsRng.fill_bytes(&mut key);
+
+        if let Some(parent) = key_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&key_path, &key) {
+            tracing::error!(error = %e, "Failed to persist audit HMAC key — events will not survive restart");
+        }
+        key
+    })
 }
 
 /// Compute HMAC-SHA256 of a canonical JSON blob.

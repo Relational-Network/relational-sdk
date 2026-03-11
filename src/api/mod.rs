@@ -128,4 +128,7 @@ pub fn drt_router() -> Router<AppState> {
         .route("/v1/drt/pools/{pool_pda}/revocations", get(credentials::list_revocations))
         .route("/v1/drt/pools/{pool_pda}/audit", get(credentials::pool_audit))
         .route("/v1/drt/pools/{pool_pda}/summary", get(credentials::pool_summary))
-        .route("/v1/drt/pools/by-wallet/{wallet_id}", get(credentials::list_pools_by_wallet))}
+        .route("/v1/drt/pools/{pool_pda}/issuance-log", get(credentials::get_issuance_log))
+        .route("/v1/drt/pools/by-wallet/{wallet_id}", get(credentials::list_pools_by_wallet))
+        // ── Marketplace discovery ────────────────────────────────
+        .route("/v1/drt/pools/list", get(credentials::list_all_pools))}

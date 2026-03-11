@@ -238,6 +238,7 @@ pub async fn create_pool(
                 pool_pda: pool_pda_str.clone(),
                 pool_name: payload.pool_name.clone(),
                 owner_wallet_id: payload.wallet_id.clone(),
+                owner_pubkey: Some(owner.to_string()),
                 schema_id: payload.schema_id.clone(),
                 state: PoolState::NeedsInit,
                 created_onchain_at: chrono::Utc::now(),
