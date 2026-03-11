@@ -314,3 +314,69 @@ pub async fn activate_wallet(
         new_status: "active".to_string(),
     }))
 }
+
+// ============================================================================
+// Role change audit logging
+// ============================================================================
+
+/// Request body for logging a role change.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct LogRoleChangeRequest {
+    /// Clerk user ID of the target user.
+    pub target_user_id: String,
+    /// Previous role (before the change).
+    pub old_role: String,
+    /// New role (after the change).
+    pub new_role: String,
+}
+
+/// Response for role change audit logging.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LogRoleChangeResponse {
+    pub logged: bool,
+}
+
+/// Log a role assignment change to the enclave audit trail.
+///
+/// Called by the dashboard after updating a user's role via Clerk API.
+/// Emits a `RoleAssigned` audit event with structured details.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/log-role-change",
+    tag = "Admin",
+    summary = "Log role change",
+    description = "Record a role assignment change in the enclave audit trail. Called after updating Clerk publicMetadata.",
+    security(("bearer_auth" = [])),
+    request_body = LogRoleChangeRequest,
+    responses(
+        (status = 200, description = "Event logged", body = LogRoleChangeResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin role required"),
+    )
+)]
+pub async fn log_role_change(
+    AdminToken(token): AdminToken,
+    State(state): State<AppState>,
+    Json(payload): Json<LogRoleChangeRequest>,
+) -> Json<LogRoleChangeResponse> {
+    let audit_event = AuditEvent::new(AuditEventType::RoleAssigned)
+        .with_user(&token.sub)
+        .with_resource("user", &payload.target_user_id)
+        .with_details(serde_json::json!({
+            "target_user": payload.target_user_id,
+            "old_role": payload.old_role,
+            "new_role": payload.new_role,
+            "assigned_by": token.sub
+        }));
+    AuditRepository::new(&state.storage).log(&audit_event).await;
+
+    info!(
+        admin = %token.sub,
+        target = %payload.target_user_id,
+        old_role = %payload.old_role,
+        new_role = %payload.new_role,
+        "Role assignment logged"
+    );
+
+    Json(LogRoleChangeResponse { logged: true })
+}

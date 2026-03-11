@@ -22,7 +22,7 @@ use solana_sdk::{
 };
 use std::collections::HashMap;
 use std::str::FromStr;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::audit_log;
 use crate::auth::UserToken;
@@ -35,10 +35,12 @@ use crate::blockchain::drt::{
     validation::validate_create_pool_request,
 };
 use crate::blockchain::signing::keypair_from_bytes_verified;
+use crate::data_validation::schema_for_id;
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage::audit::AuditEventType;
 use crate::storage::ownership::OwnershipEnforcer;
+use crate::storage::pool_metadata::{PoolMetadata, PoolState};
 use crate::storage::repository::wallets::{WalletMetadata, WalletRepository, WalletStatus};
 
 // ============================================================================
@@ -46,7 +48,7 @@ use crate::storage::repository::wallets::{WalletMetadata, WalletRepository, Wall
 // ============================================================================
 
 /// Load a wallet keypair, verifying ownership and active status.
-fn load_wallet_keypair(
+pub(crate) fn load_wallet_keypair(
     repo: &WalletRepository<'_>,
     wallet_id: &str,
     caller_sub: &str,
@@ -74,7 +76,7 @@ fn load_wallet_keypair(
 ///   create/buy/close where the UI just needs to know the tx landed.
 /// - `finalized` (~15-30s): 32 confirmations — required for redeem because the
 ///   emitted event gates irreversible enclave execution.
-async fn sign_send_and_parse(
+pub(crate) async fn sign_send_and_parse(
     state: &AppState,
     keypair: &Keypair,
     instructions: Vec<solana_sdk::instruction::Instruction>,
@@ -135,6 +137,22 @@ async fn sign_send_and_parse(
     Ok((sig_str, events))
 }
 
+/// Verify that a wallet is the owner of an on-chain pool.
+///
+/// Compares the wallet's Solana public address against `pool.owner`.
+/// Used by pool-scoped endpoints: `/initialize`, `/issue`, `/revoke`, `/audit`.
+pub(crate) fn verify_pool_ownership(
+    pool: &Pool,
+    wallet: &WalletMetadata,
+) -> Result<(), ApiError> {
+    let owner = Pubkey::from_str(&wallet.public_address)
+        .map_err(|_| ApiError::internal("invalid stored wallet address"))?;
+    if pool.owner != owner {
+        return Err(ApiError::forbidden("you are not the pool owner"));
+    }
+    Ok(())
+}
+
 fn explorer_url(state: &AppState, sig: &str) -> String {
     state.solana_client.network().explorer_tx_url(sig)
 }
@@ -168,6 +186,14 @@ pub async fn create_pool(
     // Validate all inputs.
     let drt_configs = validate_create_pool_request(&payload.pool_name, &payload.drt_configs)?;
 
+    // Validate schema_id.
+    if schema_for_id(&payload.schema_id).is_none() {
+        return Err(ApiError::bad_request(format!(
+            "unsupported schema_id: {}",
+            payload.schema_id
+        )));
+    }
+
     // Load wallet.
     let repo = WalletRepository::new(&state.storage);
     let (wallet, keypair) = load_wallet_keypair(&repo, &payload.wallet_id, &token.sub)?;
@@ -195,29 +221,85 @@ pub async fn create_pool(
     )
     .await?;
 
+    let pool_pda_str = pool_pda.to_string();
+
+    // ── Enclave-side pool initialization ─────────────────────────
+    // Create pool directory + metadata after successful on-chain tx.
+    // If this fails, the pool still exists on-chain; `/initialize` can
+    // recover by creating the dirs on first call (idempotent).
+    let mut bootstrap_warning = false;
+    let paths = state.storage.paths();
+    let dataset_dir = paths.pool_dataset_dir(&pool_pda_str);
+    let meta_path = paths.pool_meta(&pool_pda_str);
+
+    match state.storage.create_dir(&dataset_dir) {
+        Ok(()) => {
+            let meta = PoolMetadata {
+                pool_pda: pool_pda_str.clone(),
+                pool_name: payload.pool_name.clone(),
+                owner_wallet_id: payload.wallet_id.clone(),
+                schema_id: payload.schema_id.clone(),
+                state: PoolState::NeedsInit,
+                created_onchain_at: chrono::Utc::now(),
+                initialized_at: None,
+                last_issue_at: None,
+                total_credentials: 0,
+                revoked_count: 0,
+            };
+            if let Err(e) = state.storage.write_json(&meta_path, &meta) {
+                warn!(
+                    pool = %pool_pda_str,
+                    error = %e,
+                    "Failed to write pool.meta.json — pool exists on-chain, /initialize will recover"
+                );
+                bootstrap_warning = true;
+            }
+        }
+        Err(e) => {
+            warn!(
+                pool = %pool_pda_str,
+                error = %e,
+                "Failed to create pool directory — pool exists on-chain, /initialize will recover"
+            );
+            bootstrap_warning = true;
+        }
+    }
+
     info!(
         signature = %sig_str,
-        pool = %pool_pda,
+        pool = %pool_pda_str,
         owner = %owner,
         drts = drt_configs.len(),
+        schema = %payload.schema_id,
+        bootstrap_warning,
         "DRT pool created"
     );
 
-    audit_log!(
-        &state.storage,
-        AuditEventType::TransactionBroadcast,
-        &token.sub,
-        "drt_pool",
-        &pool_pda.to_string()
-    );
+    // Log pool creation audit event.
+    let audit_event = crate::storage::audit::AuditEvent::new(AuditEventType::PoolCreated)
+        .with_user(&token.sub)
+        .with_resource("drt_pool", &pool_pda_str)
+        .with_details(serde_json::json!({
+            "pool_pda": pool_pda_str,
+            "pool_name": payload.pool_name,
+            "tx_signature": sig_str,
+            "schema_id": payload.schema_id,
+            "drt_count": drt_configs.len(),
+            "state_transition": "created -> needs_init"
+        }));
+    crate::storage::audit::AuditRepository::new(&state.storage)
+        .log(&audit_event)
+        .await;
 
     Ok((
         axum::http::StatusCode::CREATED,
         Json(CreatePoolResponse {
             signature: sig_str.clone(),
-            pool_pda: pool_pda.to_string(),
+            pool_pda: pool_pda_str,
             mints,
             explorer_url: explorer_url(&state, &sig_str),
+            state: "needs_init".to_string(),
+            bootstrap_warning,
         }),
     ))
 }

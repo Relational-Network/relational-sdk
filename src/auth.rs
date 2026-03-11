@@ -11,8 +11,9 @@
 //! # Role Hierarchy
 //!
 //! Roles follow a hierarchy where higher roles include lower permissions:
-//! - `admin` - Full access (includes user and read_only)
-//! - `user` - Read/write access (includes read_only)
+//! - `admin` - Full access (includes user, analyst, and read_only)
+//! - `user` - Read/write access (includes analyst and read_only)
+//! - `analyst` - Marketplace access: buy/redeem DRTs, view pools (includes read_only)
 //! - `read_only` - Read-only access
 //!
 //! # Usage
@@ -27,7 +28,10 @@
 //! // User or admin
 //! async fn user_endpoint(UserToken(token): UserToken) -> impl IntoResponse { ... }
 //!
-//! // Any role (read_only, user, or admin)
+//! // Analyst, user, or admin
+//! async fn analyst_endpoint(AnalystToken(token): AnalystToken) -> impl IntoResponse { ... }
+//!
+//! // Any role (read_only, user, analyst, or admin)
 //! async fn read_endpoint(ReadOnlyToken(token): ReadOnlyToken) -> impl IntoResponse { ... }
 //! ```
 
@@ -75,14 +79,14 @@ pub struct AttestationClaims {
 pub struct TokenData {
     /// User/client identifier from the `sub` claim.
     pub sub: String,
-    /// User role for RBAC (admin, user, read_only).
+    /// User role for RBAC (admin, user, analyst, read_only).
     pub role: String,
 }
 
 impl TokenData {
     /// Check if the user has the required role.
     ///
-    /// Role hierarchy: admin > user > read_only
+    /// Role hierarchy: admin > user > analyst > read_only
     ///
     /// # Examples
     ///
@@ -90,16 +94,19 @@ impl TokenData {
     /// let token = TokenData { role: "admin".to_string(), ... };
     /// assert!(token.has_role("admin"));
     /// assert!(token.has_role("user"));
+    /// assert!(token.has_role("analyst"));
     /// assert!(token.has_role("read_only"));
     ///
-    /// let token = TokenData { role: "user".to_string(), ... };
+    /// let token = TokenData { role: "analyst".to_string(), ... };
     /// assert!(!token.has_role("admin"));
-    /// assert!(token.has_role("user"));
+    /// assert!(!token.has_role("user"));
+    /// assert!(token.has_role("analyst"));
     /// assert!(token.has_role("read_only"));
     /// ```
     pub fn has_role(&self, required: &str) -> bool {
         match required {
-            "read_only" => matches!(self.role.as_str(), "admin" | "user" | "read_only"),
+            "read_only" => matches!(self.role.as_str(), "admin" | "user" | "analyst" | "read_only"),
+            "analyst" => matches!(self.role.as_str(), "admin" | "user" | "analyst"),
             "user" => matches!(self.role.as_str(), "admin" | "user"),
             "admin" => self.role == "admin",
             _ => false,
@@ -389,9 +396,37 @@ impl FromRequestParts<AppState> for UserToken {
     }
 }
 
+/// Extractor that requires "analyst" role (or higher).
+///
+/// Returns 403 Forbidden if the user has only read_only role.
+///
+/// Not yet used on any route — analyst script execution is deferred
+/// to a separate sprint. The extractor is ready for when routes need it.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct AnalystToken(pub TokenData);
+
+impl FromRequestParts<AppState> for AnalystToken {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = TokenData::from_request_parts(parts, state).await?;
+        if !token.has_role("analyst") {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "analyst role required"})),
+            ));
+        }
+        Ok(AnalystToken(token))
+    }
+}
+
 /// Extractor that requires "read_only" role (or higher).
 ///
-/// Any authenticated user with a valid role passes this check.
+/// Any authenticated user with a valid role (admin, user, analyst, read_only) passes.
 #[derive(Debug, Clone)]
 pub struct ReadOnlyToken(pub TokenData);
 

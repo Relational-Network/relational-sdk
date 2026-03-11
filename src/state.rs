@@ -20,7 +20,7 @@ pub struct AppState {
     /// Cached AVS JWKS keys for token verification.
     pub jwks_cache: Arc<tokio::sync::RwLock<Option<JwksCache>>>,
 
-    // ── Wallet service (new) ────────────────────────────────────
+    // ── Wallet service ──────────────────────────────────────────
     /// Encrypted filesystem for wallet metadata + keypairs.
     pub storage: Arc<EncryptedStorage>,
     /// Solana RPC client.
@@ -29,4 +29,8 @@ pub struct AppState {
     pub tx_db: Arc<TxDatabase>,
     /// LRU cache for first-page tx queries.
     pub tx_cache: Arc<TxCache>,
+
+    // ── Pool concurrency ────────────────────────────────────────
+    /// Per-pool mutexes to serialize issuance operations on `pool.meta.json`.
+    pub pool_locks: Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }

@@ -58,6 +58,33 @@ impl StoragePaths {
         self.audit_dir().join(format!("{date}.jsonl"))
     }
 
+    // ── Pools ─────────────────────────────────────────────────────
+
+    /// `/data/pools/`
+    pub fn pools_dir(&self) -> PathBuf {
+        self.root.join("pools")
+    }
+
+    /// `/data/pools/{pool_pda}/`
+    pub fn pool_dir(&self, pda: &str) -> PathBuf {
+        self.pools_dir().join(pda)
+    }
+
+    /// `/data/pools/{pool_pda}/dataset/`
+    pub fn pool_dataset_dir(&self, pda: &str) -> PathBuf {
+        self.pool_dir(pda).join("dataset")
+    }
+
+    /// `/data/pools/{pool_pda}/pool.meta.json`
+    pub fn pool_meta(&self, pda: &str) -> PathBuf {
+        self.pool_dir(pda).join("pool.meta.json")
+    }
+
+    /// `/data/pools/{pool_pda}/revocations.jsonl`
+    pub fn pool_revocations(&self, pda: &str) -> PathBuf {
+        self.pool_dir(pda).join("revocations.jsonl")
+    }
+
     // ── Transaction DB ───────────────────────────────────────────
 
     /// `/data/tx.redb`

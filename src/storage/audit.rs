@@ -28,6 +28,13 @@ pub enum AuditEventType {
     TransactionBroadcast,
     PermissionDenied,
     AdminAccess,
+    // ── Credential issuance events ───────────────────────────────
+    PoolCreated,
+    DatasetInitialized,
+    CredentialIssued,
+    CredentialIssuanceFailed,
+    CredentialRevoked,
+    RoleAssigned,
 }
 
 /// A single audit event.
@@ -100,6 +107,12 @@ impl AuditEvent {
     ) -> Self {
         self.resource_type = Some(resource_type.into());
         self.resource_id = Some(resource_id.into());
+        self
+    }
+
+    /// Attach structured details (forensic metadata for audit queries).
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
         self
     }
 }

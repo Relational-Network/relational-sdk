@@ -166,18 +166,20 @@ struct StoredUploadMetadata {
 }
 
 #[derive(Debug, Default)]
-struct MultipartCsvInput {
-    schema_id: Option<String>,
-    file: Option<Vec<u8>>,
-    encrypted_data: Option<String>,
-    ephemeral_public_key: Option<String>,
-    nonce: Option<String>,
+pub(crate) struct MultipartCsvInput {
+    pub schema_id: Option<String>,
+    pub file: Option<Vec<u8>>,
+    pub encrypted_data: Option<String>,
+    pub ephemeral_public_key: Option<String>,
+    pub nonce: Option<String>,
+    /// Optional wallet_id field (used by pool-scoped endpoints like `/initialize`, `/issue`).
+    pub wallet_id: Option<String>,
 }
 
-struct ParsedCsvPayload {
-    schema_id: String,
-    csv_bytes: Vec<u8>,
-    source: String,
+pub(crate) struct ParsedCsvPayload {
+    pub schema_id: String,
+    pub csv_bytes: Vec<u8>,
+    pub source: String,
 }
 
 /// Validate CSV without persisting it.
@@ -441,7 +443,7 @@ pub async fn data_query(ReadOnlyToken(token): ReadOnlyToken) -> Json<DataQueryRe
     })
 }
 
-fn validate_payload(schema_id: &str, csv_bytes: &[u8]) -> Result<ValidationSummary, ApiError> {
+pub(crate) fn validate_payload(schema_id: &str, csv_bytes: &[u8]) -> Result<ValidationSummary, ApiError> {
     let schema = schema_for_id(schema_id).ok_or_else(|| {
         let supported = supported_schema_ids().join(", ");
         ApiError::bad_request(format!(
@@ -452,7 +454,7 @@ fn validate_payload(schema_id: &str, csv_bytes: &[u8]) -> Result<ValidationSumma
     Ok(validate_csv_bytes(csv_bytes, &schema))
 }
 
-async fn parse_csv_payload(multipart: Multipart) -> Result<ParsedCsvPayload, ApiError> {
+pub(crate) async fn parse_csv_payload(multipart: Multipart) -> Result<ParsedCsvPayload, ApiError> {
     let input = parse_multipart_fields(multipart).await?;
     let schema_id = input
         .schema_id
@@ -488,7 +490,7 @@ async fn parse_csv_payload(multipart: Multipart) -> Result<ParsedCsvPayload, Api
     })
 }
 
-async fn parse_multipart_fields(mut multipart: Multipart) -> Result<MultipartCsvInput, ApiError> {
+pub(crate) async fn parse_multipart_fields(mut multipart: Multipart) -> Result<MultipartCsvInput, ApiError> {
     let mut input = MultipartCsvInput::default();
     while let Some(field) = multipart
         .next_field()
@@ -543,13 +545,22 @@ async fn parse_multipart_fields(mut multipart: Multipart) -> Result<MultipartCsv
                     input.nonce = Some(value.trim().to_string());
                 }
             }
+            "wallet_id" => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|_| ApiError::bad_request("invalid wallet_id field"))?;
+                if !value.trim().is_empty() {
+                    input.wallet_id = Some(value.trim().to_string());
+                }
+            }
             _ => {}
         }
     }
     Ok(input)
 }
 
-fn ensure_size_limit(bytes: &[u8]) -> Result<(), ApiError> {
+pub(crate) fn ensure_size_limit(bytes: &[u8]) -> Result<(), ApiError> {
     if bytes.len() > MAX_BODY_SIZE {
         return Err(ApiError::bad_request(format!(
             "payload exceeds maximum size of {} bytes",

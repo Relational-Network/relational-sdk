@@ -895,6 +895,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1109,7 +1123,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1423,7 +1437,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68a7f542ee6b35af73b06abc0dad1c1bae89964e4e253bc4b587b91c9637867b"
 dependencies = [
  "cfg-if",
- "dashmap",
+ "dashmap 5.5.3",
  "futures",
  "futures-timer",
  "no-std-compat",
@@ -2166,7 +2180,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2786,6 +2800,7 @@ dependencies = [
  "bs58",
  "chrono",
  "csv",
+ "dashmap 6.1.0",
  "hex",
  "hkdf",
  "hmac",
@@ -3016,7 +3031,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3552,7 +3567,7 @@ checksum = "28412018d248fc57d9746ba2ef23971a001127ab79f3e86ffeb96210fe557b09"
 dependencies = [
  "async-trait",
  "bincode",
- "dashmap",
+ "dashmap 5.5.3",
  "futures",
  "futures-util",
  "indexmap",
@@ -4096,7 +4111,7 @@ dependencies = [
  "bincode",
  "bytes",
  "cfg-if",
- "dashmap",
+ "dashmap 5.5.3",
  "itertools",
  "log",
  "nix",
@@ -4787,7 +4802,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "crossbeam-channel",
- "dashmap",
+ "dashmap 5.5.3",
  "futures",
  "futures-util",
  "governor",
@@ -6349,7 +6364,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

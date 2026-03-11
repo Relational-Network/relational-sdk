@@ -352,6 +352,7 @@ async fn main() {
         solana_client: Arc::new(solana_client),
         tx_db,
         tx_cache,
+        pool_locks: Arc::new(dashmap::DashMap::new()),
     };
 
     // Spawn background transaction indexer only when explicitly enabled.
