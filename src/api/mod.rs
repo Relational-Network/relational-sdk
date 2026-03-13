@@ -143,10 +143,7 @@ pub fn wallet_router() -> Router<AppState> {
             "/v1/admin/wallets/{wallet_id}/activate",
             post(admin::activate_wallet),
         )
-        .route(
-            "/v1/admin/log-role-change",
-            post(admin::log_role_change),
-        )
+        .route("/v1/admin/log-role-change", post(admin::log_role_change))
 }
 
 /// Build the DRT pool routes (nested under `/v1/drt`).
@@ -168,16 +165,44 @@ pub fn drt_router() -> Router<AppState> {
             "/v1/drt/pools/{pool_pda}/balance/{drt_type}",
             get(pools::get_drt_balance),
         )
-        .route("/v1/drt/events/{signature}", get(pools::get_tx_events))        // ── Schema upload ────────────────────────────────────────
-        .route("/v1/drt/pools/{pool_pda}/schema", post(credentials::upload_schema))
+        .route("/v1/drt/events/{signature}", get(pools::get_tx_events)) // ── Schema upload ────────────────────────────────────────
+        .route(
+            "/v1/drt/pools/{pool_pda}/schema",
+            post(credentials::upload_schema),
+        )
         // ── Credential issuance ─────────────────────────────────
-        .route("/v1/drt/pools/{pool_pda}/initialize", post(credentials::initialize_pool))
-        .route("/v1/drt/pools/{pool_pda}/issue", post(credentials::issue_credentials))
-        .route("/v1/drt/pools/{pool_pda}/revoke", post(credentials::revoke_credentials))
-        .route("/v1/drt/pools/{pool_pda}/revocations", get(credentials::list_revocations))
-        .route("/v1/drt/pools/{pool_pda}/audit", get(credentials::pool_audit))
-        .route("/v1/drt/pools/{pool_pda}/summary", get(credentials::pool_summary))
-        .route("/v1/drt/pools/{pool_pda}/issuance-log", get(credentials::get_issuance_log))
-        .route("/v1/drt/pools/by-wallet/{wallet_id}", get(credentials::list_pools_by_wallet))
+        .route(
+            "/v1/drt/pools/{pool_pda}/initialize",
+            post(credentials::initialize_pool),
+        )
+        .route(
+            "/v1/drt/pools/{pool_pda}/issue",
+            post(credentials::issue_credentials),
+        )
+        .route(
+            "/v1/drt/pools/{pool_pda}/revoke",
+            post(credentials::revoke_credentials),
+        )
+        .route(
+            "/v1/drt/pools/{pool_pda}/revocations",
+            get(credentials::list_revocations),
+        )
+        .route(
+            "/v1/drt/pools/{pool_pda}/audit",
+            get(credentials::pool_audit),
+        )
+        .route(
+            "/v1/drt/pools/{pool_pda}/summary",
+            get(credentials::pool_summary),
+        )
+        .route(
+            "/v1/drt/pools/{pool_pda}/issuance-log",
+            get(credentials::get_issuance_log),
+        )
+        .route(
+            "/v1/drt/pools/by-wallet/{wallet_id}",
+            get(credentials::list_pools_by_wallet),
+        )
         // ── Marketplace discovery ────────────────────────────────
-        .route("/v1/drt/pools/list", get(credentials::list_all_pools))}
+        .route("/v1/drt/pools/list", get(credentials::list_all_pools))
+}

@@ -409,7 +409,11 @@ pub async fn data_query(ReadOnlyToken(token): ReadOnlyToken) -> Json<DataQueryRe
     })
 }
 
-pub(crate) fn validate_payload(schema_id: &str, csv_bytes: &[u8], data_dir: &std::path::Path) -> Result<ValidationSummary, ApiError> {
+pub(crate) fn validate_payload(
+    schema_id: &str,
+    csv_bytes: &[u8],
+    data_dir: &std::path::Path,
+) -> Result<ValidationSummary, ApiError> {
     let schema = schema_for_id(schema_id, data_dir).ok_or_else(|| {
         ApiError::bad_request(format!(
             "schema '{schema_id}' not found — upload it to the enclave first"
@@ -455,7 +459,9 @@ pub(crate) async fn parse_csv_payload(multipart: Multipart) -> Result<ParsedCsvP
     })
 }
 
-pub(crate) async fn parse_multipart_fields(mut multipart: Multipart) -> Result<MultipartCsvInput, ApiError> {
+pub(crate) async fn parse_multipart_fields(
+    mut multipart: Multipart,
+) -> Result<MultipartCsvInput, ApiError> {
     let mut input = MultipartCsvInput::default();
     while let Some(field) = multipart
         .next_field()

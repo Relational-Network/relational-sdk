@@ -183,12 +183,10 @@ pub async fn list_wallets(
 
     // O(1) lookup via redb index instead of O(W) filesystem scan.
     let wallets = match state.tx_db.get_wallet_id_by_owner(&token.sub)? {
-        Some(wallet_id) => {
-            match repo.get(&wallet_id) {
-                Ok(meta) if meta.status != WalletStatus::Deleted => vec![meta],
-                _ => Vec::new(),
-            }
-        }
+        Some(wallet_id) => match repo.get(&wallet_id) {
+            Ok(meta) if meta.status != WalletStatus::Deleted => vec![meta],
+            _ => Vec::new(),
+        },
         None => Vec::new(),
     };
 

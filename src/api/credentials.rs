@@ -295,10 +295,7 @@ struct DatasetFileMeta {
 // ============================================================================
 
 /// Acquire the per-pool mutex from the DashMap. Creates a new entry if absent.
-fn acquire_pool_lock(
-    state: &AppState,
-    pool_pda: &str,
-) -> Arc<tokio::sync::Mutex<()>> {
+fn acquire_pool_lock(state: &AppState, pool_pda: &str) -> Arc<tokio::sync::Mutex<()>> {
     state
         .pool_locks
         .entry(pool_pda.to_string())
@@ -309,19 +306,23 @@ fn acquire_pool_lock(
 /// Load pool metadata from enclave storage, returning a helpful error if missing.
 fn load_pool_meta(state: &AppState, pool_pda: &str) -> Result<PoolMetadata, ApiError> {
     let meta_path = state.storage.paths().pool_meta(pool_pda);
-    state.storage.read_json::<PoolMetadata>(&meta_path).map_err(|_| {
-        ApiError::not_found(format!(
-            "pool metadata not found for {pool_pda} — pool may need initialization"
-        ))
-    })
+    state
+        .storage
+        .read_json::<PoolMetadata>(&meta_path)
+        .map_err(|_| {
+            ApiError::not_found(format!(
+                "pool metadata not found for {pool_pda} — pool may need initialization"
+            ))
+        })
 }
 
 /// Save pool metadata back to storage.
 fn save_pool_meta(state: &AppState, pool_pda: &str, meta: &PoolMetadata) -> Result<(), ApiError> {
     let meta_path = state.storage.paths().pool_meta(pool_pda);
-    state.storage.write_json(&meta_path, meta).map_err(|e| {
-        ApiError::internal(format!("failed to write pool metadata: {e}"))
-    })
+    state
+        .storage
+        .write_json(&meta_path, meta)
+        .map_err(|e| ApiError::internal(format!("failed to write pool metadata: {e}")))
 }
 
 /// Recover pool directory structure if it was lost after on-chain creation.
@@ -331,9 +332,10 @@ fn ensure_pool_dirs(state: &AppState, pool_pda: &str) -> Result<bool, ApiError> 
     if state.storage.exists(&dataset_dir) {
         return Ok(false);
     }
-    state.storage.create_dir(&dataset_dir).map_err(|e| {
-        ApiError::internal(format!("failed to create pool directory: {e}"))
-    })?;
+    state
+        .storage
+        .create_dir(&dataset_dir)
+        .map_err(|e| ApiError::internal(format!("failed to create pool directory: {e}")))?;
     Ok(true)
 }
 
@@ -445,7 +447,10 @@ pub async fn upload_schema(
             "schema_id": payload.schema_id,
             "field_count": field_count,
         }));
-    AuditRepository::new(&state.storage).with_tx_db(&state.tx_db).log(&audit_event).await;
+    AuditRepository::new(&state.storage)
+        .with_tx_db(&state.tx_db)
+        .log(&audit_event)
+        .await;
 
     Ok(Json(UploadSchemaResponse {
         schema_id: payload.schema_id,
@@ -550,9 +555,10 @@ pub async fn initialize_pool(
     let csv_path = dataset_dir.join("initial.csv");
     let meta_file_path = dataset_dir.join("initial.meta.json");
 
-    state.storage.write_raw(&csv_path, &parsed.csv_bytes).map_err(|e| {
-        ApiError::internal(format!("failed to write initial dataset: {e}"))
-    })?;
+    state
+        .storage
+        .write_raw(&csv_path, &parsed.csv_bytes)
+        .map_err(|e| ApiError::internal(format!("failed to write initial dataset: {e}")))?;
 
     let file_meta = DatasetFileMeta {
         record_id: record_id.clone(),
@@ -561,9 +567,10 @@ pub async fn initialize_pool(
         uploaded_at: Utc::now().to_rfc3339(),
         redeem_tx_signature: None,
     };
-    state.storage.write_json(&meta_file_path, &file_meta).map_err(|e| {
-        ApiError::internal(format!("failed to write dataset metadata: {e}"))
-    })?;
+    state
+        .storage
+        .write_json(&meta_file_path, &file_meta)
+        .map_err(|e| ApiError::internal(format!("failed to write dataset metadata: {e}")))?;
 
     // Update pool metadata.
     meta.state = PoolState::Ready;
@@ -598,7 +605,10 @@ pub async fn initialize_pool(
             "schema_id": meta.schema_id,
             "state_transition": "needs_init -> ready"
         }));
-    AuditRepository::new(&state.storage).with_tx_db(&state.tx_db).log(&audit_event).await;
+    AuditRepository::new(&state.storage)
+        .with_tx_db(&state.tx_db)
+        .log(&audit_event)
+        .await;
 
     info!(
         pool = %pool_pda_str,
@@ -632,7 +642,6 @@ pub async fn initialize_pool(
         (status = 200, description = "Credentials issued", body = IssueCredentialsResponse),
         (status = 400, description = "Validation error or insufficient DRTs"),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Not pool owner"),
         (status = 404, description = "Pool not found"),
         (status = 503, description = "Solana RPC unavailable"),
     )
@@ -659,26 +668,31 @@ pub async fn issue_credentials(
         ));
     }
 
-    // Load caller's wallet and verify pool ownership.
+    // Load caller's wallet (any admin with append DRTs can issue).
+    let caller_wallet = super::get_active_wallet_for_user(&state, &token.sub)?;
     let repo = WalletRepository::new(&state.storage);
-    let (wallet, keypair) = load_wallet_keypair(
-        &repo,
-        &meta.owner_wallet_id,
-        &token.sub,
+    let keypair_bytes = repo.read_keypair(&caller_wallet.wallet_id)?;
+    let keypair = crate::blockchain::signing::keypair_from_bytes_verified(
+        &keypair_bytes,
+        &caller_wallet.public_address,
     )?;
 
-    // Fetch on-chain pool and verify ownership.
+    // Fetch on-chain pool for DRT configuration.
     let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
-    verify_pool_ownership(&pool, &wallet)?;
 
     // Find the "append" DRT config in the pool.
     let append_drt = find_drt_in_pool(&pool, "append")?;
 
     // Check wallet has ≥1 append DRT.
-    let user_pubkey = Pubkey::from_str(&wallet.public_address)
+    let user_pubkey = Pubkey::from_str(&caller_wallet.public_address)
         .map_err(|_| ApiError::internal("invalid stored wallet address"))?;
     let user_ata = derive_user_ata(&user_pubkey, &append_drt.mint);
-    let user_balance = match state.solana_client.rpc().get_token_account_balance(&user_ata).await {
+    let user_balance = match state
+        .solana_client
+        .rpc()
+        .get_token_account_balance(&user_ata)
+        .await
+    {
         Ok(b) => b.amount.parse::<u64>().unwrap_or(0),
         Err(_) => 0,
     };
@@ -710,20 +724,14 @@ pub async fn issue_credentials(
     let ix = build_redeem_drt(&pool_pda, &keypair.pubkey(), "append", &append_drt.mint)
         .map_err(ApiError::internal)?;
 
-    let (sig_str, _events) = match sign_send_and_parse(
-        &state,
-        &keypair,
-        vec![ix],
-        "finalized",
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            // DRT not burned — clean failure.
-            return Err(e);
-        }
-    };
+    let (sig_str, _events) =
+        match sign_send_and_parse(&state, &keypair, vec![ix], "finalized").await {
+            Ok(result) => result,
+            Err(e) => {
+                // DRT not burned — clean failure.
+                return Err(e);
+            }
+        };
 
     // 2. Store CSV dataset.
     let record_id = Uuid::new_v4().to_string();
@@ -749,7 +757,10 @@ pub async fn issue_credentials(
                 "redeem_tx_sig": sig_str,
                 "error": e.to_string()
             }));
-        AuditRepository::new(&state.storage).with_tx_db(&state.tx_db).log(&fail_event).await;
+        AuditRepository::new(&state.storage)
+            .with_tx_db(&state.tx_db)
+            .log(&fail_event)
+            .await;
 
         return Err(ApiError::internal(format!(
             "DRT burned (sig: {sig_str}) but file write failed — contact admin for recovery"
@@ -805,7 +816,10 @@ pub async fn issue_credentials(
             "redeem_tx_sig": sig_str,
             "total_credentials": updated_meta.total_credentials
         }));
-    AuditRepository::new(&state.storage).with_tx_db(&state.tx_db).log(&audit_event).await;
+    AuditRepository::new(&state.storage)
+        .with_tx_db(&state.tx_db)
+        .log(&audit_event)
+        .await;
 
     let explorer_url = state.solana_client.network().explorer_tx_url(&sig_str);
 
@@ -933,7 +947,10 @@ pub async fn revoke_credentials(
             reason: payload.reason.clone(),
         };
         if let Ok(json_bytes) = serde_json::to_vec(&entry) {
-            if let Err(e) = state.tx_db.upsert_revocation(&pool_pda_str, cid, &json_bytes) {
+            if let Err(e) = state
+                .tx_db
+                .upsert_revocation(&pool_pda_str, cid, &json_bytes)
+            {
                 warn!(pool = %pool_pda_str, credential = %cid, error = %e, "Failed to write revocation to redb");
             }
         }
@@ -949,7 +966,10 @@ pub async fn revoke_credentials(
             "revoked_count": revoked_count,
             "reason": payload.reason
         }));
-    AuditRepository::new(&state.storage).with_tx_db(&state.tx_db).log(&audit_event).await;
+    AuditRepository::new(&state.storage)
+        .with_tx_db(&state.tx_db)
+        .log(&audit_event)
+        .await;
 
     info!(
         pool = %pool_pda_str,
@@ -977,24 +997,16 @@ pub async fn revoke_credentials(
     responses(
         (status = 200, description = "Revocation list", body = RevocationsResponse),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Not pool owner"),
         (status = 404, description = "Pool not found"),
     )
 )]
 pub async fn list_revocations(
-    AdminToken(token): AdminToken,
+    AdminToken(_token): AdminToken,
     State(state): State<AppState>,
     Path(pool_pda_str): Path<String>,
     Query(pagination): Query<super::PaginationQuery>,
 ) -> Result<Json<RevocationsResponse>, ApiError> {
-    let pool_pda = Pubkey::from_str(&pool_pda_str)
-        .map_err(|_| ApiError::bad_request("invalid pool PDA address"))?;
-
-    // Verify ownership (O(1) via redb index).
-    let wallet = super::get_active_wallet_for_user(&state, &token.sub)?;
-
-    let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
-    verify_pool_ownership(&pool, &wallet)?;
+    // Any admin can view revocations (no ownership check).
 
     // Read revocations from redb (O(k) prefix scan).
     let limit = pagination.clamped_limit();
@@ -1039,24 +1051,16 @@ pub async fn list_revocations(
     responses(
         (status = 200, description = "Audit events", body = PoolAuditResponse),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Not pool owner"),
         (status = 404, description = "Pool not found"),
     )
 )]
 pub async fn pool_audit(
-    AdminToken(token): AdminToken,
+    AdminToken(_token): AdminToken,
     State(state): State<AppState>,
     Path(pool_pda_str): Path<String>,
     Query(query): Query<PoolAuditQuery>,
 ) -> Result<Json<PoolAuditResponse>, ApiError> {
-    let pool_pda = Pubkey::from_str(&pool_pda_str)
-        .map_err(|_| ApiError::bad_request("invalid pool PDA address"))?;
-
-    // Verify ownership (O(1) via redb index).
-    let wallet = super::get_active_wallet_for_user(&state, &token.sub)?;
-
-    let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
-    verify_pool_ownership(&pool, &wallet)?;
+    // Any admin can view audit events (no ownership check).
 
     // Query audit events from redb (indexed by resource_id = pool_pda).
     let limit = query.limit.min(200);
@@ -1095,7 +1099,7 @@ pub async fn pool_audit(
     )
 )]
 pub async fn pool_summary(
-    AdminToken(_token): AdminToken,
+    crate::auth::UserToken(_token): crate::auth::UserToken,
     State(state): State<AppState>,
     Path(pool_pda_str): Path<String>,
 ) -> Result<Json<PoolSummaryResponse>, ApiError> {
@@ -1179,9 +1183,10 @@ pub async fn list_pools_by_wallet(
     crate::storage::ownership::OwnershipEnforcer::verify_ownership(&wallet, &token.sub)?;
 
     // O(k) lookup via redb index (no dir scan).
-    let metas = state.tx_db.list_pools_by_owner(&wallet_id).map_err(|e| {
-        ApiError::internal(format!("failed to query pools by owner: {e}"))
-    })?;
+    let metas = state
+        .tx_db
+        .list_pools_by_owner(&wallet_id)
+        .map_err(|e| ApiError::internal(format!("failed to query pools by owner: {e}")))?;
 
     let total = metas.len();
 
@@ -1236,9 +1241,10 @@ pub async fn list_all_pools(
     Query(query): Query<ListAllPoolsQuery>,
 ) -> Result<Json<AllPoolsResponse>, ApiError> {
     // Read all pool metadata from redb (no dir scan).
-    let all_metas = state.tx_db.list_all_pool_metas().map_err(|e| {
-        ApiError::internal(format!("failed to list pool metadata: {e}"))
-    })?;
+    let all_metas = state
+        .tx_db
+        .list_all_pool_metas()
+        .map_err(|e| ApiError::internal(format!("failed to list pool metadata: {e}")))?;
 
     let mut entries: Vec<MarketplacePoolEntry> = Vec::new();
     for meta in all_metas {
@@ -1256,13 +1262,20 @@ pub async fn list_all_pools(
 
         // Apply search filter (case-insensitive on pool name).
         if let Some(ref search) = query.search {
-            if !meta.pool_name.to_lowercase().contains(&search.to_lowercase()) {
+            if !meta
+                .pool_name
+                .to_lowercase()
+                .contains(&search.to_lowercase())
+            {
                 continue;
             }
         }
 
         // Resolve owner pubkey: use stored value or fall back to "unknown".
-        let owner = meta.owner_pubkey.clone().unwrap_or_else(|| "unknown".to_string());
+        let owner = meta
+            .owner_pubkey
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
 
         // Fetch live DRT data from chain (acceptable at ~6 pools).
         let pool_drts = match fetch_pool(
@@ -1302,7 +1315,9 @@ pub async fn list_all_pools(
     // Sort.
     match query.sort.as_str() {
         "created_asc" => entries.sort_by(|a, b| a.created_at.cmp(&b.created_at)),
-        "name_asc" => entries.sort_by(|a, b| a.pool_name.to_lowercase().cmp(&b.pool_name.to_lowercase())),
+        "name_asc" => {
+            entries.sort_by(|a, b| a.pool_name.to_lowercase().cmp(&b.pool_name.to_lowercase()))
+        }
         "credentials_desc" => entries.sort_by(|a, b| b.total_credentials.cmp(&a.total_credentials)),
         _ => entries.sort_by(|a, b| b.created_at.cmp(&a.created_at)), // created_desc
     }
@@ -1343,24 +1358,16 @@ pub async fn list_all_pools(
     responses(
         (status = 200, description = "Issuance log", body = IssuanceLogResponse),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Not pool owner"),
         (status = 404, description = "Pool not found"),
     )
 )]
 pub async fn get_issuance_log(
-    AdminToken(token): AdminToken,
+    AdminToken(_token): AdminToken,
     State(state): State<AppState>,
     Path(pool_pda_str): Path<String>,
     Query(pagination): Query<super::PaginationQuery>,
 ) -> Result<Json<IssuanceLogResponse>, ApiError> {
-    let pool_pda = Pubkey::from_str(&pool_pda_str)
-        .map_err(|_| ApiError::bad_request("invalid pool PDA address"))?;
-
-    // Verify ownership (O(1) via redb index).
-    let wallet = super::get_active_wallet_for_user(&state, &token.sub)?;
-
-    let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
-    verify_pool_ownership(&pool, &wallet)?;
+    // Any admin can view issuance log (no ownership check).
 
     // Read issuance records from redb (already sorted newest-first by key design).
     let limit = pagination.clamped_limit();

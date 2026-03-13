@@ -105,7 +105,10 @@ impl TokenData {
     /// ```
     pub fn has_role(&self, required: &str) -> bool {
         match required {
-            "read_only" => matches!(self.role.as_str(), "admin" | "user" | "analyst" | "read_only"),
+            "read_only" => matches!(
+                self.role.as_str(),
+                "admin" | "user" | "analyst" | "read_only"
+            ),
             "analyst" => matches!(self.role.as_str(), "admin" | "user" | "analyst"),
             "user" => matches!(self.role.as_str(), "admin" | "user"),
             "admin" => self.role == "admin",

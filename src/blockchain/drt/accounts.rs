@@ -6,8 +6,8 @@
 use borsh::BorshDeserialize;
 use solana_pubkey::Pubkey;
 
-use crate::blockchain::rpc::JsonRpcClient;
 use super::types::{DrtConfig, Pool, DISC_POOL_ACCOUNT};
+use crate::blockchain::rpc::JsonRpcClient;
 use crate::error::ApiError;
 
 /// Maximum expected size of a Pool account (after discriminator).

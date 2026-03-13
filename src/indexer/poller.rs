@@ -117,13 +117,7 @@ async fn poll_address(
     // Fetch recent signatures via JSON-RPC.
     let sigs = solana
         .rpc()
-        .get_signatures_for_address(
-            &pubkey,
-            None,
-            until_sig.as_deref(),
-            Some(50),
-            "confirmed",
-        )
+        .get_signatures_for_address(&pubkey, None, until_sig.as_deref(), Some(50), "confirmed")
         .await?;
 
     if sigs.is_empty() {
@@ -152,11 +146,7 @@ async fn poll_address(
         }
 
         // Fetch full transaction details via JSON-RPC.
-        match solana
-            .rpc()
-            .get_transaction(sig_str, "confirmed")
-            .await
-        {
+        match solana.rpc().get_transaction(sig_str, "confirmed").await {
             Ok(tx_detail) => {
                 let status = if sig_info.err.is_some() {
                     TxStatus::Failed
@@ -175,9 +165,7 @@ async fn poll_address(
                 let fee = tx_detail.meta.as_ref().map(|m| m.fee).unwrap_or(0);
                 let (amount_lamports, amount_display) = if let Some(meta) = &tx_detail.meta {
                     // Find the index of our address in the account keys.
-                    let addr_index = account_keys
-                        .iter()
-                        .position(|k| k == address);
+                    let addr_index = account_keys.iter().position(|k| k == address);
 
                     if let Some(idx) = addr_index {
                         let pre = meta.pre_balances.get(idx).copied().unwrap_or(0);
@@ -201,10 +189,7 @@ async fn poll_address(
                 // For sent txs: find the recipient (usually 2nd account key).
                 // For received txs: fee payer is the sender.
                 let (from_addr, to_addr) = if is_sender {
-                    let recipient = account_keys
-                        .get(1)
-                        .cloned()
-                        .unwrap_or_default();
+                    let recipient = account_keys.get(1).cloned().unwrap_or_default();
                     (address.to_string(), recipient)
                 } else {
                     (fee_payer.clone(), address.to_string())

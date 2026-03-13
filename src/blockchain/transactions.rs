@@ -95,8 +95,7 @@ impl SolanaClient {
                 ApiError::service_unavailable(format!("transaction send failed: {e}"))
             })?;
 
-        self.await_confirmation(&signature, "confirmed")
-            .await?;
+        self.await_confirmation(&signature, "confirmed").await?;
 
         let sig_str = signature.to_string();
         info!(signature = %sig_str, to = %recipient, lamports, "SOL transfer sent");

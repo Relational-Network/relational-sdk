@@ -115,10 +115,7 @@ pub(crate) async fn sign_send_and_parse(
 ///
 /// Compares the wallet's Solana public address against `pool.owner`.
 /// Used by pool-scoped endpoints: `/initialize`, `/issue`, `/revoke`, `/audit`.
-pub(crate) fn verify_pool_ownership(
-    pool: &Pool,
-    wallet: &WalletMetadata,
-) -> Result<(), ApiError> {
+pub(crate) fn verify_pool_ownership(pool: &Pool, wallet: &WalletMetadata) -> Result<(), ApiError> {
     let owner = Pubkey::from_str(&wallet.public_address)
         .map_err(|_| ApiError::internal("invalid stored wallet address"))?;
     if pool.owner != owner {
@@ -183,13 +180,8 @@ pub async fn create_pool(
     let instructions =
         build_create_pool_atomic(&owner, &pool_pda, &payload.pool_name, &drt_configs)
             .map_err(ApiError::internal)?;
-    let (sig_str, _events) = sign_send_and_parse(
-        &state,
-        &keypair,
-        instructions,
-        "confirmed",
-    )
-    .await?;
+    let (sig_str, _events) =
+        sign_send_and_parse(&state, &keypair, instructions, "confirmed").await?;
 
     let pool_pda_str = pool_pda.to_string();
 
@@ -408,13 +400,7 @@ pub async fn buy_drt(
     )
     .map_err(ApiError::internal)?;
 
-    let (sig_str, events) = sign_send_and_parse(
-        &state,
-        &keypair,
-        vec![ix],
-        "confirmed",
-    )
-    .await?;
+    let (sig_str, events) = sign_send_and_parse(&state, &keypair, vec![ix], "confirmed").await?;
 
     // Find purchased event.
     let purchased_event = events.iter().find_map(|e| {
@@ -445,7 +431,7 @@ pub async fn buy_drt(
         let evt = crate::storage::audit::AuditEvent::new(AuditEventType::DrtPurchased)
             .with_user(&token.sub)
             .with_resource("drt_buy", &sig_str)
-            .with_pool_pda(&pool_pda.to_string())
+            .with_pool_pda(pool_pda.to_string())
             .with_details(serde_json::json!({
                 "drt_type": payload.drt_type,
                 "amount": payload.amount,
@@ -507,13 +493,7 @@ pub async fn redeem_drt(
 
     // Redeem requires `finalized` — the emitted event gates irreversible
     // enclave execution (code fetch + hash verify + run on data).
-    let (sig_str, events) = sign_send_and_parse(
-        &state,
-        &keypair,
-        vec![ix],
-        "finalized",
-    )
-    .await?;
+    let (sig_str, events) = sign_send_and_parse(&state, &keypair, vec![ix], "finalized").await?;
 
     // Find redeem event (DrtRedeemed or AppendRedeemed).
     let redeem_event = events.iter().find_map(|e| match e {
@@ -545,7 +525,7 @@ pub async fn redeem_drt(
         let evt = crate::storage::audit::AuditEvent::new(AuditEventType::DrtRedeemed)
             .with_user(&token.sub)
             .with_resource("drt_redeem", &sig_str)
-            .with_pool_pda(&pool_pda.to_string())
+            .with_pool_pda(pool_pda.to_string())
             .with_details(serde_json::json!({
                 "drt_type": payload.drt_type,
                 "tx_signature": sig_str,
@@ -606,13 +586,7 @@ pub async fn close_pool(
     }
 
     let ix = build_close_pool(&pool_pda, &owner, &pool.drts);
-    let (sig_str, _events) = sign_send_and_parse(
-        &state,
-        &keypair,
-        vec![ix],
-        "confirmed",
-    )
-    .await?;
+    let (sig_str, _events) = sign_send_and_parse(&state, &keypair, vec![ix], "confirmed").await?;
 
     info!(
         signature = %sig_str,
@@ -628,8 +602,8 @@ pub async fn close_pool(
     {
         let evt = crate::storage::audit::AuditEvent::new(AuditEventType::PoolClosed)
             .with_user(&token.sub)
-            .with_resource("drt_pool", &pool_pda.to_string())
-            .with_pool_pda(&pool_pda.to_string())
+            .with_resource("drt_pool", pool_pda.to_string())
+            .with_pool_pda(pool_pda.to_string())
             .with_details(serde_json::json!({
                 "tx_signature": sig_str,
             }));

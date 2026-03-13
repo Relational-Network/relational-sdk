@@ -104,7 +104,7 @@ fn audit_hmac_key() -> [u8; 32] {
         if let Some(parent) = key_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(e) = std::fs::write(&key_path, &key) {
+        if let Err(e) = std::fs::write(&key_path, key) {
             tracing::error!(error = %e, "Failed to persist audit HMAC key — events will not survive restart");
         }
         key
@@ -161,6 +161,7 @@ impl AuditEvent {
     }
 
     /// Attach a correlation ID to link related operations.
+    #[allow(dead_code)] //TODO
     pub fn with_correlation_id(mut self, id: impl Into<String>) -> Self {
         self.correlation_id = Some(id.into());
         self
@@ -183,7 +184,10 @@ pub struct AuditRepository<'a> {
 
 impl<'a> AuditRepository<'a> {
     pub fn new(storage: &'a EncryptedStorage) -> Self {
-        Self { storage, tx_db: None }
+        Self {
+            storage,
+            tx_db: None,
+        }
     }
 
     /// Attach a `TxDatabase` reference for dual-write to redb audit tables.
@@ -254,6 +258,7 @@ impl<'a> AuditRepository<'a> {
     /// Read only events with a valid HMAC for the given date.
     ///
     /// Legacy events without an HMAC field are excluded.
+    #[allow(dead_code)] //TODO
     pub fn read_verified_events(&self, date: &str) -> Vec<AuditEvent> {
         let path = self.storage.paths().audit_events_file(date);
         let data = match std::fs::read_to_string(&path) {
@@ -297,8 +302,7 @@ impl<'a> AuditRepository<'a> {
 macro_rules! audit_log {
     // With tx_db for redb dual-write.
     ($storage:expr, $tx_db:expr, $event_type:expr, $user_id:expr, $resource_type:expr, $resource_id:expr) => {{
-        let repo = $crate::storage::audit::AuditRepository::new($storage)
-            .with_tx_db($tx_db);
+        let repo = $crate::storage::audit::AuditRepository::new($storage).with_tx_db($tx_db);
         repo.log(
             &$crate::storage::audit::AuditEvent::new($event_type)
                 .with_user($user_id)

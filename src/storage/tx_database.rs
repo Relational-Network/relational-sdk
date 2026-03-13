@@ -413,7 +413,11 @@ impl TxDatabase {
     }
 
     /// Read pool metadata by PDA.
-    pub fn get_pool_meta(&self, pool_pda: &str) -> TxDbResult<Option<super::pool_metadata::PoolMetadata>> {
+    #[allow(dead_code)] // TODO
+    pub fn get_pool_meta(
+        &self,
+        pool_pda: &str,
+    ) -> TxDbResult<Option<super::pool_metadata::PoolMetadata>> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(POOL_METADATA)?;
         match table.get(pool_pda)? {
@@ -432,7 +436,9 @@ impl TxDatabase {
         let mut result = Vec::new();
         for entry in table.iter()? {
             let (_k, v) = entry?;
-            if let Ok(meta) = serde_json::from_slice::<super::pool_metadata::PoolMetadata>(v.value()) {
+            if let Ok(meta) =
+                serde_json::from_slice::<super::pool_metadata::PoolMetadata>(v.value())
+            {
                 result.push(meta);
             }
         }
@@ -440,7 +446,10 @@ impl TxDatabase {
     }
 
     /// List pools owned by a specific wallet (prefix scan on POOL_BY_OWNER).
-    pub fn list_pools_by_owner(&self, owner_wallet_id: &str) -> TxDbResult<Vec<super::pool_metadata::PoolMetadata>> {
+    pub fn list_pools_by_owner(
+        &self,
+        owner_wallet_id: &str,
+    ) -> TxDbResult<Vec<super::pool_metadata::PoolMetadata>> {
         let read_txn = self.db.begin_read()?;
         let idx = read_txn.open_table(POOL_BY_OWNER)?;
         let meta_table = read_txn.open_table(POOL_METADATA)?;
@@ -457,7 +466,9 @@ impl TxDatabase {
             // Extract pool_pda from key: "owner_wallet_id|pool_pda"
             if let Some(pool_pda) = key_str.strip_prefix(&prefix) {
                 if let Some(bytes) = meta_table.get(pool_pda)? {
-                    if let Ok(meta) = serde_json::from_slice::<super::pool_metadata::PoolMetadata>(bytes.value()) {
+                    if let Ok(meta) =
+                        serde_json::from_slice::<super::pool_metadata::PoolMetadata>(bytes.value())
+                    {
                         result.push(meta);
                     }
                 }
@@ -645,11 +656,8 @@ impl TxDatabase {
             // Resource index (if resource_id is set).
             if let Some(ref resource_id) = event.resource_id {
                 let mut by_resource = write_txn.open_table(AUDIT_BY_RESOURCE)?;
-                let key = make_pool_ts_key(
-                    resource_id,
-                    event.timestamp.timestamp(),
-                    &event.event_id,
-                );
+                let key =
+                    make_pool_ts_key(resource_id, event.timestamp.timestamp(), &event.event_id);
                 by_resource.insert(key.as_str(), "")?;
             }
 
@@ -694,7 +702,9 @@ impl TxDatabase {
             // Extract event_id: last segment after "|"
             if let Some(event_id) = key_str.rsplit('|').next() {
                 if let Some(bytes) = events.get(event_id)? {
-                    if let Ok(ev) = serde_json::from_slice::<super::audit::AuditEvent>(bytes.value()) {
+                    if let Ok(ev) =
+                        serde_json::from_slice::<super::audit::AuditEvent>(bytes.value())
+                    {
                         results.push(ev);
                     }
                 }
@@ -751,7 +761,9 @@ impl TxDatabase {
             // Extract event_id from key: "YYYY-MM-DD|event_id"
             if let Some(event_id) = key_str.strip_prefix(&prefix) {
                 if let Some(bytes) = events.get(event_id)? {
-                    if let Ok(ev) = serde_json::from_slice::<super::audit::AuditEvent>(bytes.value()) {
+                    if let Ok(ev) =
+                        serde_json::from_slice::<super::audit::AuditEvent>(bytes.value())
+                    {
                         results.push(ev);
                     }
                 }
@@ -761,6 +773,7 @@ impl TxDatabase {
     }
 
     /// Count audit events for a specific date.
+    #[allow(dead_code)] // TODO
     pub fn count_audit_by_date(&self, date: &str) -> TxDbResult<usize> {
         let read_txn = self.db.begin_read()?;
         let idx = read_txn.open_table(AUDIT_BY_DATE)?;

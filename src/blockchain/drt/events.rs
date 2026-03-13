@@ -234,10 +234,7 @@ pub async fn parse_events_from_signature_with_commitment(
             crate::error::ApiError::service_unavailable(format!("failed to fetch transaction: {e}"))
         })?;
 
-    let logs = tx
-        .meta
-        .map(|m| m.log_messages)
-        .unwrap_or_default();
+    let logs = tx.meta.map(|m| m.log_messages).unwrap_or_default();
 
     Ok(parse_drt_events(&logs))
 }

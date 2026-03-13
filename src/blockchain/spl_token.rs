@@ -136,11 +136,7 @@ impl SolanaClient {
             .map(|opt| opt.is_some())
             .unwrap_or(false);
         if !to_ata_exists {
-            instructions.push(create_ata_instruction(
-                &keypair.pubkey(),
-                &to_pubkey,
-                &mint,
-            ));
+            instructions.push(create_ata_instruction(&keypair.pubkey(), &to_pubkey, &mint));
         }
 
         // SPL transfer instruction.
@@ -153,16 +149,18 @@ impl SolanaClient {
             decimals,
         ));
 
-        let recent_blockhash = self.rpc.get_latest_blockhash().await.map_err(|e| {
-            ApiError::service_unavailable(format!("blockhash fetch failed: {e}"))
-        })?;
+        let recent_blockhash =
+            self.rpc.get_latest_blockhash().await.map_err(|e| {
+                ApiError::service_unavailable(format!("blockhash fetch failed: {e}"))
+            })?;
 
         let message = solana_message::Message::new(&instructions, Some(&keypair.pubkey()));
         let tx = solana_transaction::Transaction::new(&[keypair], message, recent_blockhash);
 
-        let signature = self.rpc.send_transaction(&tx).await.map_err(|e| {
-            ApiError::service_unavailable(format!("SPL transfer send failed: {e}"))
-        })?;
+        let signature =
+            self.rpc.send_transaction(&tx).await.map_err(|e| {
+                ApiError::service_unavailable(format!("SPL transfer send failed: {e}"))
+            })?;
 
         self.await_confirmation(&signature, "confirmed").await?;
 

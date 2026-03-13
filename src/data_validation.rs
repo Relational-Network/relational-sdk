@@ -63,19 +63,14 @@ pub fn schema_for_id(schema_id: &str, data_dir: &Path) -> Option<Vec<FieldSchema
 /// Persist a schema definition to `{data_dir}/schemas/{schema_id}.json`.
 ///
 /// Creates the `schemas/` directory if it does not exist.
-pub fn save_schema(
-    schema_id: &str,
-    schema: &[FieldSchema],
-    data_dir: &Path,
-) -> Result<(), String> {
+pub fn save_schema(schema_id: &str, schema: &[FieldSchema], data_dir: &Path) -> Result<(), String> {
     let schemas_dir = data_dir.join("schemas");
     std::fs::create_dir_all(&schemas_dir)
         .map_err(|e| format!("failed to create schemas directory: {e}"))?;
     let schema_path = schemas_dir.join(format!("{schema_id}.json"));
     let json = serde_json::to_string_pretty(schema)
         .map_err(|e| format!("failed to serialize schema: {e}"))?;
-    std::fs::write(&schema_path, json)
-        .map_err(|e| format!("failed to write schema file: {e}"))?;
+    std::fs::write(&schema_path, json).map_err(|e| format!("failed to write schema file: {e}"))?;
     Ok(())
 }
 
@@ -278,23 +273,94 @@ mod tests {
     /// Test-only helper: returns the pilot_v1 schema for validation tests.
     fn test_pilot_schema() -> Vec<FieldSchema> {
         vec![
-            FieldSchema { name: "description".into(), field_type: FieldType::Char(5), nullable: true },
-            FieldSchema { name: "externalTypeId".into(), field_type: FieldType::Integer, nullable: false },
-            FieldSchema { name: "privacy".into(), field_type: FieldType::Flag01, nullable: true },
-            FieldSchema { name: "issuingBody".into(), field_type: FieldType::Char(3), nullable: true },
-            FieldSchema { name: "memberBody".into(), field_type: FieldType::Char(3), nullable: true },
-            FieldSchema { name: "awardBoardDate".into(), field_type: FieldType::DateDdMmYyyy, nullable: true },
-            FieldSchema { name: "awardGpaValue".into(), field_type: FieldType::Decimal { precision: 10, scale: 2 }, nullable: true },
-            FieldSchema { name: "awardResult".into(), field_type: FieldType::Varchar(100), nullable: false },
-            FieldSchema { name: "awardName".into(), field_type: FieldType::Varchar(240), nullable: true },
-            FieldSchema { name: "awardMajorCode".into(), field_type: FieldType::Varchar(50), nullable: true },
-            FieldSchema { name: "awardProgrammeCode".into(), field_type: FieldType::Varchar(50), nullable: true },
-            FieldSchema { name: "awardYear".into(), field_type: FieldType::Varchar(9), nullable: true },
-            FieldSchema { name: "awardType".into(), field_type: FieldType::Integer, nullable: true },
-            FieldSchema { name: "updated_at".into(), field_type: FieldType::DateDdMmYyyy, nullable: true },
-            FieldSchema { name: "created_at".into(), field_type: FieldType::DateDdMmYyyy, nullable: true },
-            FieldSchema { name: "is_deleted".into(), field_type: FieldType::Flag01, nullable: true },
-            FieldSchema { name: "azureId".into(), field_type: FieldType::Varchar(36), nullable: true },
+            FieldSchema {
+                name: "description".into(),
+                field_type: FieldType::Char(5),
+                nullable: true,
+            },
+            FieldSchema {
+                name: "externalTypeId".into(),
+                field_type: FieldType::Integer,
+                nullable: false,
+            },
+            FieldSchema {
+                name: "privacy".into(),
+                field_type: FieldType::Flag01,
+                nullable: true,
+            },
+            FieldSchema {
+                name: "issuingBody".into(),
+                field_type: FieldType::Char(3),
+                nullable: true,
+            },
+            FieldSchema {
+                name: "memberBody".into(),
+                field_type: FieldType::Char(3),
+                nullable: true,
+            },
+            FieldSchema {
+                name: "awardBoardDate".into(),
+                field_type: FieldType::DateDdMmYyyy,
+                nullable: true,
+            },
+            FieldSchema {
+                name: "awardGpaValue".into(),
+                field_type: FieldType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+                nullable: true,
+            },
+            FieldSchema {
+                name: "awardResult".into(),
+                field_type: FieldType::Varchar(100),
+                nullable: false,
+            },
+            FieldSchema {
+                name: "awardName".into(),
+                field_type: FieldType::Varchar(240),
+                nullable: true,
+            },
+            FieldSchema {
+                name: "awardMajorCode".into(),
+                field_type: FieldType::Varchar(50),
+                nullable: true,
+            },
+            FieldSchema {
+                name: "awardProgrammeCode".into(),
+                field_type: FieldType::Varchar(50),
+                nullable: true,
+            },
+            FieldSchema {
+                name: "awardYear".into(),
+                field_type: FieldType::Varchar(9),
+                nullable: true,
+            },
+            FieldSchema {
+                name: "awardType".into(),
+                field_type: FieldType::Integer,
+                nullable: true,
+            },
+            FieldSchema {
+                name: "updated_at".into(),
+                field_type: FieldType::DateDdMmYyyy,
+                nullable: true,
+            },
+            FieldSchema {
+                name: "created_at".into(),
+                field_type: FieldType::DateDdMmYyyy,
+                nullable: true,
+            },
+            FieldSchema {
+                name: "is_deleted".into(),
+                field_type: FieldType::Flag01,
+                nullable: true,
+            },
+            FieldSchema {
+                name: "azureId".into(),
+                field_type: FieldType::Varchar(36),
+                nullable: true,
+            },
         ]
     }
 

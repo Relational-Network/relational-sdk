@@ -265,8 +265,7 @@ impl JsonRpcClient {
                 json!([encoded, {"commitment": self.commitment}]),
             )
             .await?;
-        ctx.value
-            .ok_or_else(|| RpcError::new("null fee response"))
+        ctx.value.ok_or_else(|| RpcError::new("null fee response"))
     }
 
     /// `getHealth` → Ok(()) if healthy.
@@ -314,9 +313,7 @@ impl JsonRpcClient {
             .await?;
 
         if result.is_null() {
-            return Err(RpcError::new(format!(
-                "transaction {signature} not found"
-            )));
+            return Err(RpcError::new(format!("transaction {signature} not found")));
         }
 
         Ok(TransactionDetail {
