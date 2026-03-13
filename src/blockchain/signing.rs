@@ -4,8 +4,8 @@
 //! Load Ed25519 keypairs from stored byte arrays.
 
 use crate::error::ApiError;
-use solana_sdk::signer::keypair::Keypair;
-use solana_sdk::signer::Signer;
+use solana_keypair::Keypair;
+use solana_signer::Signer;
 
 /// Reconstruct a Solana [`Keypair`] from the 64-byte array stored on disk.
 pub fn keypair_from_bytes(bytes: &[u8]) -> Result<Keypair, ApiError> {

@@ -85,6 +85,13 @@ pub const INDEXER_ENABLED: bool = false;
 /// Tx indexer poll interval in seconds (when enabled).
 pub const INDEXER_POLL_INTERVAL_SECS: u64 = 60;
 
+/// Minimum seconds between on-demand Solana RPC syncs for the same address.
+///
+/// Prevents expensive repeated RPC calls on rapid page loads.
+/// After syncing an address, subsequent requests within this window
+/// skip the RPC call and return cached data from redb.
+pub const SYNC_COOLDOWN_SECS: u64 = 10;
+
 /// LRU cache capacity (number of wallet first-pages cached).
 pub const TX_CACHE_CAPACITY: usize = 128;
 
@@ -109,9 +116,9 @@ pub const NONCE_PURGE_INTERVAL_SECS: u64 = 900;
 pub const DRT_PROGRAM_ID_STR: &str = "kG7AyfxRoNKcYWGH8aDR6tCFpLVcETt2kBVaPnQCrnp";
 
 /// Get the DRT program `Pubkey` (parsed from the hardcoded constant).
-pub fn drt_program_id() -> solana_sdk::pubkey::Pubkey {
+pub fn drt_program_id() -> solana_pubkey::Pubkey {
     use std::str::FromStr;
-    solana_sdk::pubkey::Pubkey::from_str(DRT_PROGRAM_ID_STR)
+    solana_pubkey::Pubkey::from_str(DRT_PROGRAM_ID_STR)
         .expect("DRT_PROGRAM_ID_STR is a valid Solana pubkey")
 }
 

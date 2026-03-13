@@ -6,7 +6,7 @@
 //! All addresses are deterministic and must match the on-chain program's
 //! seed conventions exactly.
 
-use solana_sdk::pubkey::Pubkey;
+use solana_pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::OnceLock;
 

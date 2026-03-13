@@ -62,8 +62,8 @@ use config::{
 use crypto::enclave_key;
 use handlers::{
     admin_status, data_query, data_upload, data_upload_file, data_validate, get_public_key,
-    protected, AdminStatusResponse, DataFileUploadResponse, DataQueryResponse, DataUploadRequest,
-    DataUploadResponse, DataValidateResponse, ProtectedResponse,
+    AdminStatusResponse, DataFileUploadResponse, DataQueryResponse, DataUploadRequest,
+    DataUploadResponse, DataValidateResponse,
 };
 use health::{health, liveness, readiness, HealthChecks, HealthResponse, ReadyResponse};
 use state::AppState;
@@ -122,7 +122,6 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         health::liveness,
         health::readiness,
         handlers::get_public_key,
-        handlers::protected,
         handlers::admin_status,
         handlers::data_validate,
         handlers::data_upload,
@@ -135,7 +134,6 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         api::wallets::get_wallet,
         api::wallets::delete_wallet,
         api::balance::get_balance,
-        api::balance::get_native_balance,
         api::transactions::estimate_fee,
         api::transactions::send_transaction,
         api::transactions::list_transactions,
@@ -154,12 +152,22 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         api::pools::close_pool,
         api::pools::get_drt_balance,
         api::pools::get_tx_events,
+        // Credential / Pool discovery API
+        api::credentials::upload_schema,
+        api::credentials::initialize_pool,
+        api::credentials::issue_credentials,
+        api::credentials::revoke_credentials,
+        api::credentials::list_revocations,
+        api::credentials::pool_audit,
+        api::credentials::pool_summary,
+        api::credentials::get_issuance_log,
+        api::credentials::list_pools_by_wallet,
+        api::credentials::list_all_pools,
     ),
     components(schemas(
         HealthResponse,
         ReadyResponse,
         HealthChecks,
-        ProtectedResponse,
         AdminStatusResponse,
         DataUploadRequest,
         DataUploadResponse,
@@ -176,7 +184,6 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         api::wallets::GetWalletResponse,
         api::wallets::DeleteWalletResponse,
         api::balance::BalanceResponse,
-        api::balance::NativeBalanceResponse,
         api::transactions::EstimateFeeRequest,
         api::transactions::EstimateFeeResponse,
         api::transactions::SendTransactionRequest,
@@ -213,6 +220,28 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         blockchain::drt::types::RedeemEventResponse,
         blockchain::drt::types::TxEventsResponse,
         blockchain::drt::types::DrtEventResponse,
+        // Credential schemas
+        api::credentials::UploadSchemaRequest,
+        api::credentials::UploadSchemaResponse,
+        api::credentials::InitializePoolResponse,
+        api::credentials::IssueCredentialsResponse,
+        api::credentials::RevokeCredentialsRequest,
+        api::credentials::RevokeCredentialsResponse,
+        api::credentials::RevocationEntry,
+        api::credentials::RevocationsResponse,
+        api::credentials::PoolAuditResponse,
+        api::credentials::PoolSummaryResponse,
+        api::credentials::DrtConfigResponseCompact,
+        api::credentials::PoolListEntry,
+        api::credentials::PoolsByWalletResponse,
+        api::credentials::MarketplaceDrtEntry,
+        api::credentials::MarketplacePoolEntry,
+        api::credentials::AllPoolsResponse,
+        api::credentials::IssuanceRecord,
+        api::credentials::IssuanceLogResponse,
+        // Audit schemas
+        storage::audit::AuditEvent,
+        storage::audit::AuditEventType,
     )),
     modifiers(&SecurityAddon),
     tags(
@@ -226,6 +255,7 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         (name = "Balance", description = "Balance query endpoints"),
         (name = "Transactions", description = "Transaction endpoints"),
         (name = "DRT Pools", description = "Data Rights Token pool endpoints"),
+        (name = "Credentials", description = "Credential issuance, revocation, and pool discovery"),
     )
 )]
 struct ApiDoc;
@@ -268,6 +298,9 @@ async fn main() {
 
     // Capture process start for uptime reporting.
     let _ = STARTED_AT.set(Instant::now());
+
+    // Install rustls crypto provider early — reqwest and axum-server both need it.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     // Initialize enclave keypair.
     let _ = enclave_key();
@@ -403,7 +436,6 @@ async fn main() {
         .route("/health/ready", get(readiness))
         // v1 API endpoints.
         .route("/v1/attestation/public-key", get(get_public_key))
-        .route("/v1/protected", get(protected))
         .route("/v1/admin/status", get(admin_status))
         .route("/v1/data/validate", post(data_validate))
         .route("/v1/data/upload", post(data_upload))
@@ -439,9 +471,6 @@ async fn main() {
         && std::path::Path::new(DEFAULT_TLS_KEY_PATH).exists();
 
     if tls_paths_exist {
-        // Install rustls crypto provider.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         // Load TLS configuration.
         let tls_config = load_tls_config(DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH)
             .await

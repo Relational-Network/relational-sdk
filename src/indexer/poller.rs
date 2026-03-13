@@ -8,11 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use solana_client::rpc_config::RpcTransactionConfig;
-use solana_commitment_config::CommitmentConfig;
-use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::Signature;
-use solana_transaction_status::{EncodedTransaction, UiMessage, UiTransactionEncoding};
+use solana_pubkey::Pubkey;
 use std::str::FromStr;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
@@ -49,6 +45,9 @@ pub fn spawn_indexer(
 }
 
 /// Trigger a one-shot sync for a single address.
+///
+/// Respects a per-address cooldown (`SYNC_COOLDOWN_SECS`) to prevent
+/// expensive repeated RPC calls on rapid page loads.
 pub async fn sync_address_once(
     solana: &SolanaClient,
     tx_db: &TxDatabase,
@@ -56,7 +55,27 @@ pub async fn sync_address_once(
     address: &str,
     wallet_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    poll_address(solana, tx_db, tx_cache, address, wallet_id).await
+    // Check sync cooldown.
+    let cooldown_key = format!("last_sync_ts:{address}");
+    if let Ok(Some(ts_bytes)) = tx_db.get_indexer_state(&cooldown_key) {
+        if let Ok(ts_str) = std::str::from_utf8(&ts_bytes) {
+            if let Ok(last_ts) = ts_str.parse::<i64>() {
+                let now = Utc::now().timestamp();
+                if now - last_ts < crate::config::SYNC_COOLDOWN_SECS as i64 {
+                    debug!(address = %address, "Sync cooldown active — skipping RPC call");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    poll_address(solana, tx_db, tx_cache, address, wallet_id).await?;
+
+    // Update cooldown timestamp.
+    let now_str = Utc::now().timestamp().to_string();
+    tx_db.set_indexer_state(&cooldown_key, now_str.as_bytes())?;
+
+    Ok(())
 }
 
 /// Single poll cycle: iterate all registered addresses and fetch new sigs.
@@ -93,19 +112,18 @@ async fn poll_address(
     let until_sig = last_sig
         .as_deref()
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .and_then(|s| Signature::from_str(s).ok());
+        .map(String::from);
 
-    // Fetch recent signatures.
-    let config = solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config {
-        before: None,
-        until: until_sig,
-        limit: Some(50),
-        commitment: Some(CommitmentConfig::confirmed()),
-    };
-
+    // Fetch recent signatures via JSON-RPC.
     let sigs = solana
         .rpc()
-        .get_signatures_for_address_with_config(&pubkey, config)
+        .get_signatures_for_address(
+            &pubkey,
+            None,
+            until_sig.as_deref(),
+            Some(50),
+            "confirmed",
+        )
         .await?;
 
     if sigs.is_empty() {
@@ -133,17 +151,10 @@ async fn poll_address(
             continue;
         }
 
-        // Fetch full transaction details.
-        let signature = Signature::from_str(sig_str)?;
-        let tx_config = RpcTransactionConfig {
-            encoding: Some(UiTransactionEncoding::JsonParsed),
-            commitment: Some(CommitmentConfig::confirmed()),
-            max_supported_transaction_version: Some(0),
-        };
-
+        // Fetch full transaction details via JSON-RPC.
         match solana
             .rpc()
-            .get_transaction_with_config(&signature, tx_config)
+            .get_transaction(sig_str, "confirmed")
             .await
         {
             Ok(tx_detail) => {
@@ -156,30 +167,69 @@ async fn poll_address(
                 let now = Utc::now();
 
                 // Extract fee payer (first account key) to determine direction.
-                let fee_payer =
-                    extract_fee_payer(&tx_detail.transaction.transaction).unwrap_or_default();
+                let account_keys = &tx_detail.transaction.account_keys;
+                let fee_payer = account_keys.first().cloned().unwrap_or_default();
                 let is_sender = fee_payer == address;
+
+                // ── Amount parsing from pre/post balances ──────────
+                let fee = tx_detail.meta.as_ref().map(|m| m.fee).unwrap_or(0);
+                let (amount_lamports, amount_display) = if let Some(meta) = &tx_detail.meta {
+                    // Find the index of our address in the account keys.
+                    let addr_index = account_keys
+                        .iter()
+                        .position(|k| k == address);
+
+                    if let Some(idx) = addr_index {
+                        let pre = meta.pre_balances.get(idx).copied().unwrap_or(0);
+                        let post = meta.post_balances.get(idx).copied().unwrap_or(0);
+                        // For the sender, subtract the fee to get the actual transfer amount.
+                        let lam = if is_sender {
+                            pre.saturating_sub(post).saturating_sub(fee)
+                        } else {
+                            post.saturating_sub(pre)
+                        };
+                        let sol = lam as f64 / 1_000_000_000.0;
+                        (Some(lam), format!("{sol:.9}"))
+                    } else {
+                        (None, "0".to_string())
+                    }
+                } else {
+                    (None, "0".to_string())
+                };
+
+                // ── Counterparty resolution ─────────────────────
+                // For sent txs: find the recipient (usually 2nd account key).
+                // For received txs: fee payer is the sender.
+                let (from_addr, to_addr) = if is_sender {
+                    let recipient = account_keys
+                        .get(1)
+                        .cloned()
+                        .unwrap_or_default();
+                    (address.to_string(), recipient)
+                } else {
+                    (fee_payer.clone(), address.to_string())
+                };
+
+                // Resolve counterparty wallet_id if the other address is registered.
+                let counterparty_addr = if is_sender { &to_addr } else { &from_addr };
+                let counterparty_wallet_id = tx_db
+                    .get_wallet_id_for_address(counterparty_addr)
+                    .ok()
+                    .flatten();
 
                 let stored = StoredTransaction {
                     signature: sig_str.clone(),
                     wallet_id: wallet_id.to_string(),
-                    counterparty_wallet_id: None,
-                    from: if is_sender {
-                        address.to_string()
-                    } else {
-                        fee_payer
-                    },
-                    to: if is_sender {
-                        String::new()
-                    } else {
-                        address.to_string()
-                    },
-                    amount: "0".to_string(), // parsed below if available
+                    counterparty_wallet_id,
+                    from: from_addr,
+                    to: to_addr,
+                    amount: amount_display,
+                    amount_lamports,
                     token: TokenType::Native,
                     network: solana.network().name.to_string(),
                     status,
                     slot: Some(tx_detail.slot),
-                    fee_lamports: tx_detail.transaction.meta.as_ref().map(|m| m.fee),
+                    fee_lamports: tx_detail.meta.as_ref().map(|m| m.fee),
                     explorer_url: solana.network().explorer_tx_url(sig_str),
                     created_at: sig_info
                         .block_time
@@ -211,18 +261,4 @@ async fn poll_address(
     tx_cache.invalidate(address);
 
     Ok(())
-}
-
-/// Extract the fee payer (first account key) from an encoded Solana transaction.
-///
-/// The fee payer is the first key in the account list. If this address matches
-/// the wallet being indexed, the transaction was "sent" by this wallet.
-fn extract_fee_payer(tx: &EncodedTransaction) -> Option<String> {
-    match tx {
-        EncodedTransaction::Json(ui_tx) => match &ui_tx.message {
-            UiMessage::Parsed(parsed) => parsed.account_keys.first().map(|a| a.pubkey.clone()),
-            UiMessage::Raw(raw) => raw.account_keys.first().cloned(),
-        },
-        _ => None,
-    }
 }

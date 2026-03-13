@@ -33,11 +33,16 @@ pub enum AuditEventType {
     AdminAccess,
     // ── Credential issuance events ───────────────────────────────
     PoolCreated,
+    PoolClosed,
     DatasetInitialized,
     CredentialIssued,
     CredentialIssuanceFailed,
     CredentialRevoked,
     RoleAssigned,
+    // ── DRT marketplace events ───────────────────────────────────
+    DrtPurchased,
+    DrtRedeemed,
+    SchemaUploaded,
 }
 
 /// A single audit event.
@@ -59,6 +64,12 @@ pub struct AuditEvent {
     /// (computed with `hmac` field absent). `None` for legacy events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
+    /// Correlation ID linking related operations (e.g. redeem + issue).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Pool PDA for pool-scoped events (previously buried in `details` JSON).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_pda: Option<String>,
 }
 
 type HmacSha256 = Hmac<Sha256>;
@@ -121,6 +132,8 @@ impl AuditEvent {
             details: None,
             success: true,
             hmac: None,
+            correlation_id: None,
+            pool_pda: None,
         }
     }
 
@@ -146,16 +159,37 @@ impl AuditEvent {
         self.details = Some(details);
         self
     }
+
+    /// Attach a correlation ID to link related operations.
+    pub fn with_correlation_id(mut self, id: impl Into<String>) -> Self {
+        self.correlation_id = Some(id.into());
+        self
+    }
+
+    /// Attach a pool PDA for pool-scoped events.
+    pub fn with_pool_pda(mut self, pda: impl Into<String>) -> Self {
+        self.pool_pda = Some(pda.into());
+        self
+    }
 }
 
-/// Writes [`AuditEvent`]s to daily JSONL files.
+use super::tx_database::TxDatabase;
+
+/// Writes [`AuditEvent`]s to daily JSONL files and optionally to redb.
 pub struct AuditRepository<'a> {
     storage: &'a EncryptedStorage,
+    tx_db: Option<&'a TxDatabase>,
 }
 
 impl<'a> AuditRepository<'a> {
     pub fn new(storage: &'a EncryptedStorage) -> Self {
-        Self { storage }
+        Self { storage, tx_db: None }
+    }
+
+    /// Attach a `TxDatabase` reference for dual-write to redb audit tables.
+    pub fn with_tx_db(mut self, tx_db: &'a TxDatabase) -> Self {
+        self.tx_db = Some(tx_db);
+        self
     }
 
     /// Append an event to today's audit log.
@@ -208,6 +242,13 @@ impl<'a> AuditRepository<'a> {
                 warn!(error = %e, "Failed to serialize audit event for HMAC");
             }
         }
+
+        // Dual-write: persist to redb audit tables (if tx_db attached).
+        if let Some(tx_db) = self.tx_db {
+            if let Err(e) = tx_db.log_audit_event(event) {
+                warn!(error = %e, event_id = %event.event_id, "Failed to write audit event to redb");
+            }
+        }
     }
 
     /// Read only events with a valid HMAC for the given date.
@@ -247,10 +288,25 @@ impl<'a> AuditRepository<'a> {
 /// non-blocking because it uses `tokio::fs` internally.
 ///
 /// ```rust,ignore
+/// // With redb dual-write:
+/// audit_log!(storage, tx_db, AuditEventType::WalletCreated, "user_123", "wallet", "wallet_456");
+/// // Without redb (legacy, file-only):
 /// audit_log!(storage, AuditEventType::WalletCreated, "user_123", "wallet", "wallet_456");
 /// ```
 #[macro_export]
 macro_rules! audit_log {
+    // With tx_db for redb dual-write.
+    ($storage:expr, $tx_db:expr, $event_type:expr, $user_id:expr, $resource_type:expr, $resource_id:expr) => {{
+        let repo = $crate::storage::audit::AuditRepository::new($storage)
+            .with_tx_db($tx_db);
+        repo.log(
+            &$crate::storage::audit::AuditEvent::new($event_type)
+                .with_user($user_id)
+                .with_resource($resource_type, $resource_id),
+        )
+        .await;
+    }};
+    // Legacy: file-only write.
     ($storage:expr, $event_type:expr, $user_id:expr, $resource_type:expr, $resource_id:expr) => {{
         let repo = $crate::storage::audit::AuditRepository::new($storage);
         repo.log(

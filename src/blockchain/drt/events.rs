@@ -15,7 +15,7 @@
 
 use base64::Engine;
 use borsh::BorshDeserialize;
-use solana_sdk::pubkey::Pubkey;
+use solana_pubkey::Pubkey;
 
 use super::types::*;
 
@@ -215,53 +215,28 @@ pub fn parse_drt_events(logs: &[String]) -> Vec<DrtEvent> {
 
 /// Fetch and parse DRT events from a confirmed transaction signature.
 pub async fn parse_events_from_signature(
-    rpc: &solana_client::nonblocking::rpc_client::RpcClient,
+    rpc: &crate::blockchain::rpc::JsonRpcClient,
     signature_str: &str,
 ) -> Result<Vec<DrtEvent>, crate::error::ApiError> {
-    parse_events_from_signature_with_commitment(
-        rpc,
-        signature_str,
-        solana_commitment_config::CommitmentConfig::confirmed(),
-    )
-    .await
+    parse_events_from_signature_with_commitment(rpc, signature_str, "confirmed").await
 }
 
 /// Fetch and parse DRT events at a specific commitment level.
 pub async fn parse_events_from_signature_with_commitment(
-    rpc: &solana_client::nonblocking::rpc_client::RpcClient,
+    rpc: &crate::blockchain::rpc::JsonRpcClient,
     signature_str: &str,
-    commitment: solana_commitment_config::CommitmentConfig,
+    commitment: &str,
 ) -> Result<Vec<DrtEvent>, crate::error::ApiError> {
-    use solana_sdk::signature::Signature;
-    use solana_transaction_status::UiTransactionEncoding;
-    use std::str::FromStr;
-
-    let signature = Signature::from_str(signature_str)
-        .map_err(|_| crate::error::ApiError::bad_request("invalid transaction signature"))?;
-
-    let config = solana_client::rpc_config::RpcTransactionConfig {
-        encoding: Some(UiTransactionEncoding::Json),
-        commitment: Some(commitment),
-        max_supported_transaction_version: Some(0),
-    };
-
     let tx = rpc
-        .get_transaction_with_config(&signature, config)
+        .get_transaction(signature_str, commitment)
         .await
         .map_err(|e| {
             crate::error::ApiError::service_unavailable(format!("failed to fetch transaction: {e}"))
         })?;
 
-    let logs: Vec<String> = tx
-        .transaction
+    let logs = tx
         .meta
-        .and_then(|m| {
-            use solana_transaction_status::option_serializer::OptionSerializer;
-            match m.log_messages {
-                OptionSerializer::Some(v) => Some(v),
-                _ => None,
-            }
-        })
+        .map(|m| m.log_messages)
         .unwrap_or_default();
 
     Ok(parse_drt_events(&logs))

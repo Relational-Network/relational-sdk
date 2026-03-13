@@ -3,16 +3,14 @@
 
 //! Raw Solana instruction builders for the DRT program.
 //!
-//! Each function returns a `solana_sdk::instruction::Instruction` ready to
+//! Each function returns a `solana_instruction::Instruction` ready to
 //! be included in a transaction. No `anchor-client` dependency — we build
 //! the instruction data directly with the 8-byte Anchor discriminator
 //! followed by Borsh-serialized arguments.
 
 use borsh::BorshSerialize;
-use solana_sdk::{
-    instruction::{AccountMeta, Instruction},
-    pubkey::Pubkey,
-};
+use solana_instruction::{AccountMeta, Instruction};
+use solana_pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::OnceLock;
 

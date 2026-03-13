@@ -4,18 +4,17 @@
 //! Generic CSV schema registry and validator.
 
 use std::collections::HashMap;
+use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// Maximum number of validation errors returned per request.
 pub const MAX_VALIDATION_ERRORS: usize = 100;
 
-/// Built-in schema used by the pilot while keeping API generic.
-pub const DEFAULT_SCHEMA_ID: &str = "pilot_v1";
-
 /// Field type constraints supported by the CSV validator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum FieldType {
     Char(usize),
     Varchar(usize),
@@ -26,9 +25,9 @@ pub enum FieldType {
 }
 
 /// Schema definition for a single CSV column.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FieldSchema {
-    pub name: &'static str,
+    pub name: String,
     pub field_type: FieldType,
     pub nullable: bool,
 }
@@ -52,19 +51,32 @@ pub struct ValidationSummary {
     pub rows_validated: usize,
 }
 
-/// Return the schema for a logical `schema_id`.
+/// Load a schema from disk at `{data_dir}/schemas/{schema_id}.json`.
 ///
-/// The API is generic and schema-based; pilot currently ships with one schema.
-pub fn schema_for_id(schema_id: &str) -> Option<Vec<FieldSchema>> {
-    match schema_id {
-        DEFAULT_SCHEMA_ID | "default" => Some(default_pilot_schema()),
-        _ => None,
-    }
+/// Returns `None` if the schema file does not exist or cannot be parsed.
+pub fn schema_for_id(schema_id: &str, data_dir: &Path) -> Option<Vec<FieldSchema>> {
+    let schema_path = data_dir.join("schemas").join(format!("{schema_id}.json"));
+    let content = std::fs::read_to_string(&schema_path).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
-/// Return supported schema IDs for API error messages.
-pub fn supported_schema_ids() -> Vec<&'static str> {
-    vec![DEFAULT_SCHEMA_ID, "default"]
+/// Persist a schema definition to `{data_dir}/schemas/{schema_id}.json`.
+///
+/// Creates the `schemas/` directory if it does not exist.
+pub fn save_schema(
+    schema_id: &str,
+    schema: &[FieldSchema],
+    data_dir: &Path,
+) -> Result<(), String> {
+    let schemas_dir = data_dir.join("schemas");
+    std::fs::create_dir_all(&schemas_dir)
+        .map_err(|e| format!("failed to create schemas directory: {e}"))?;
+    let schema_path = schemas_dir.join(format!("{schema_id}.json"));
+    let json = serde_json::to_string_pretty(schema)
+        .map_err(|e| format!("failed to serialize schema: {e}"))?;
+    std::fs::write(&schema_path, json)
+        .map_err(|e| format!("failed to write schema file: {e}"))?;
+    Ok(())
 }
 
 /// Validate CSV bytes against a given schema.
@@ -98,7 +110,7 @@ pub fn validate_csv_bytes(data: &[u8], schema: &[FieldSchema]) -> ValidationSumm
     }
 
     for field in schema {
-        if !header_to_index.contains_key(field.name) {
+        if !header_to_index.contains_key(field.name.as_str()) {
             errors.push(ValidationError {
                 row: 0,
                 field: field.name.to_string(),
@@ -138,7 +150,7 @@ pub fn validate_csv_bytes(data: &[u8], schema: &[FieldSchema]) -> ValidationSumm
                 break;
             }
 
-            let Some(col_idx) = header_to_index.get(field.name) else {
+            let Some(col_idx) = header_to_index.get(field.name.as_str()) else {
                 continue;
             };
 
@@ -259,102 +271,32 @@ fn validate_date_dd_mm_yyyy(value: &str) -> Option<String> {
     }
 }
 
-fn default_pilot_schema() -> Vec<FieldSchema> {
-    vec![
-        FieldSchema {
-            name: "description",
-            field_type: FieldType::Char(5),
-            nullable: true,
-        },
-        FieldSchema {
-            name: "externalTypeId",
-            field_type: FieldType::Integer,
-            nullable: false,
-        },
-        FieldSchema {
-            name: "privacy",
-            field_type: FieldType::Flag01,
-            nullable: true,
-        },
-        FieldSchema {
-            name: "issuingBody",
-            field_type: FieldType::Char(3),
-            nullable: true,
-        },
-        FieldSchema {
-            name: "memberBody",
-            field_type: FieldType::Char(3),
-            nullable: true,
-        },
-        FieldSchema {
-            name: "awardBoardDate",
-            field_type: FieldType::DateDdMmYyyy,
-            nullable: true,
-        },
-        FieldSchema {
-            name: "awardGpaValue",
-            field_type: FieldType::Decimal {
-                precision: 10,
-                scale: 2,
-            },
-            nullable: true,
-        },
-        FieldSchema {
-            name: "awardResult",
-            field_type: FieldType::Varchar(100),
-            nullable: false,
-        },
-        FieldSchema {
-            name: "awardName",
-            field_type: FieldType::Varchar(240),
-            nullable: true,
-        },
-        FieldSchema {
-            name: "awardMajorCode",
-            field_type: FieldType::Varchar(50),
-            nullable: true,
-        },
-        FieldSchema {
-            name: "awardProgrammeCode",
-            field_type: FieldType::Varchar(50),
-            nullable: true,
-        },
-        FieldSchema {
-            name: "awardYear",
-            field_type: FieldType::Varchar(9),
-            nullable: true,
-        },
-        FieldSchema {
-            name: "awardType",
-            field_type: FieldType::Integer,
-            nullable: true,
-        },
-        FieldSchema {
-            name: "updated_at",
-            field_type: FieldType::DateDdMmYyyy,
-            nullable: true,
-        },
-        FieldSchema {
-            name: "created_at",
-            field_type: FieldType::DateDdMmYyyy,
-            nullable: true,
-        },
-        FieldSchema {
-            name: "is_deleted",
-            field_type: FieldType::Flag01,
-            nullable: true,
-        },
-        FieldSchema {
-            name: "azureId",
-            field_type: FieldType::Varchar(36),
-            nullable: true,
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test-only helper: returns the pilot_v1 schema for validation tests.
+    fn test_pilot_schema() -> Vec<FieldSchema> {
+        vec![
+            FieldSchema { name: "description".into(), field_type: FieldType::Char(5), nullable: true },
+            FieldSchema { name: "externalTypeId".into(), field_type: FieldType::Integer, nullable: false },
+            FieldSchema { name: "privacy".into(), field_type: FieldType::Flag01, nullable: true },
+            FieldSchema { name: "issuingBody".into(), field_type: FieldType::Char(3), nullable: true },
+            FieldSchema { name: "memberBody".into(), field_type: FieldType::Char(3), nullable: true },
+            FieldSchema { name: "awardBoardDate".into(), field_type: FieldType::DateDdMmYyyy, nullable: true },
+            FieldSchema { name: "awardGpaValue".into(), field_type: FieldType::Decimal { precision: 10, scale: 2 }, nullable: true },
+            FieldSchema { name: "awardResult".into(), field_type: FieldType::Varchar(100), nullable: false },
+            FieldSchema { name: "awardName".into(), field_type: FieldType::Varchar(240), nullable: true },
+            FieldSchema { name: "awardMajorCode".into(), field_type: FieldType::Varchar(50), nullable: true },
+            FieldSchema { name: "awardProgrammeCode".into(), field_type: FieldType::Varchar(50), nullable: true },
+            FieldSchema { name: "awardYear".into(), field_type: FieldType::Varchar(9), nullable: true },
+            FieldSchema { name: "awardType".into(), field_type: FieldType::Integer, nullable: true },
+            FieldSchema { name: "updated_at".into(), field_type: FieldType::DateDdMmYyyy, nullable: true },
+            FieldSchema { name: "created_at".into(), field_type: FieldType::DateDdMmYyyy, nullable: true },
+            FieldSchema { name: "is_deleted".into(), field_type: FieldType::Flag01, nullable: true },
+            FieldSchema { name: "azureId".into(), field_type: FieldType::Varchar(36), nullable: true },
+        ]
+    }
 
     fn valid_csv() -> String {
         [
@@ -366,7 +308,7 @@ mod tests {
 
     #[test]
     fn validates_happy_path() {
-        let schema = schema_for_id(DEFAULT_SCHEMA_ID).expect("schema should exist");
+        let schema = test_pilot_schema();
         let result = validate_csv_bytes(valid_csv().as_bytes(), &schema);
         assert!(result.valid, "expected valid CSV, got: {:?}", result.errors);
         assert_eq!(result.rows_validated, 1);
@@ -375,7 +317,7 @@ mod tests {
     #[test]
     fn rejects_missing_required_column() {
         let csv = "externalTypeId,awardResult\n1,PASS\n";
-        let schema = schema_for_id(DEFAULT_SCHEMA_ID).expect("schema should exist");
+        let schema = test_pilot_schema();
         let result = validate_csv_bytes(csv.as_bytes(), &schema);
         assert!(!result.valid);
         assert!(result
@@ -391,7 +333,7 @@ mod tests {
             ",,1,,,,,,Name,,,,,,,0,",
         ]
         .join("\n");
-        let schema = schema_for_id(DEFAULT_SCHEMA_ID).expect("schema should exist");
+        let schema = test_pilot_schema();
         let result = validate_csv_bytes(csv.as_bytes(), &schema);
         assert!(!result.valid);
         assert!(result
@@ -411,7 +353,7 @@ mod tests {
             "A,1,1,ISS,MB1,01/02/2025,9.999,PASS,Name,MAJOR,PROG,2024,2,01/02/2025,01/02/2025,0,id",
         ]
         .join("\n");
-        let schema = schema_for_id(DEFAULT_SCHEMA_ID).expect("schema should exist");
+        let schema = test_pilot_schema();
         let result = validate_csv_bytes(csv.as_bytes(), &schema);
         assert!(!result.valid);
         assert!(result
@@ -427,12 +369,33 @@ mod tests {
             "A,1,1,ISS,MB1,32/13/2025,9.50,PASS,Name,MAJOR,PROG,2024,2,01/02/2025,01/02/2025,0,id",
         ]
         .join("\n");
-        let schema = schema_for_id(DEFAULT_SCHEMA_ID).expect("schema should exist");
+        let schema = test_pilot_schema();
         let result = validate_csv_bytes(csv.as_bytes(), &schema);
         assert!(!result.valid);
         assert!(result
             .errors
             .iter()
             .any(|e| e.field == "awardBoardDate" && e.message.contains("Invalid calendar date")));
+    }
+
+    #[test]
+    fn round_trips_schema_through_json() {
+        let schema = test_pilot_schema();
+        let json = serde_json::to_string(&schema).expect("serialize");
+        let loaded: Vec<FieldSchema> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(loaded.len(), schema.len());
+        assert_eq!(loaded[0].name, "description");
+    }
+
+    #[test]
+    fn save_and_load_schema_from_disk() {
+        let dir = std::env::temp_dir().join(format!("schema_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let schema = test_pilot_schema();
+        save_schema("test_v1", &schema, &dir).expect("save");
+        let loaded = schema_for_id("test_v1", &dir).expect("load");
+        assert_eq!(loaded.len(), schema.len());
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

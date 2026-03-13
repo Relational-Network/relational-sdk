@@ -20,12 +20,11 @@ use tracing::{debug, info};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::auth::{AdminToken, ReadOnlyToken, TokenData, UserToken};
+use crate::auth::{AdminToken, ReadOnlyToken, UserToken};
 use crate::config::MAX_BODY_SIZE;
 use crate::crypto::{enclave_key, Jwk};
 use crate::data_validation::{
-    schema_for_id, supported_schema_ids, validate_csv_bytes, ValidationError, ValidationSummary,
-    DEFAULT_SCHEMA_ID,
+    schema_for_id, validate_csv_bytes, ValidationError, ValidationSummary,
 };
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -55,42 +54,6 @@ pub async fn get_public_key() -> Json<Jwk> {
     debug!("Serving enclave public key");
     let key = enclave_key();
     Json(key.public_jwk().clone())
-}
-
-// ============================================================================
-// Protected Endpoints
-// ============================================================================
-
-/// Response for the /protected endpoint.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ProtectedResponse {
-    pub message: String,
-    pub user: String,
-    pub role: String,
-}
-
-/// Protected endpoint that requires any valid token.
-///
-/// Returns information about the authenticated user.
-#[utoipa::path(
-    get,
-    path = "/v1/protected",
-    tag = "Protected",
-    summary = "Protected endpoint",
-    description = "Requires valid JWT token. Returns user information.",
-    security(("bearer_auth" = [])),
-    responses(
-        (status = 200, description = "Authenticated successfully", body = ProtectedResponse),
-        (status = 401, description = "Unauthorized - missing or invalid token")
-    )
-)]
-pub async fn protected(token: TokenData) -> Json<ProtectedResponse> {
-    debug!(sub = %token.sub, role = %token.role, "Protected endpoint accessed");
-    Json(ProtectedResponse {
-        message: "authenticated inside enclave".to_string(),
-        user: token.sub,
-        role: token.role,
-    })
 }
 
 // ============================================================================
@@ -199,10 +162,12 @@ pub(crate) struct ParsedCsvPayload {
 )]
 pub async fn data_validate(
     UserToken(_token): UserToken,
+    State(state): State<AppState>,
     multipart: Multipart,
 ) -> Result<Json<DataValidateResponse>, ApiError> {
     let payload = parse_csv_payload(multipart).await?;
-    let validation = validate_payload(&payload.schema_id, &payload.csv_bytes)?;
+    let data_dir = state.storage.paths().root();
+    let validation = validate_payload(&payload.schema_id, &payload.csv_bytes, data_dir)?;
 
     Ok(Json(DataValidateResponse {
         valid: validation.valid,
@@ -233,7 +198,8 @@ pub async fn data_upload_file(
     multipart: Multipart,
 ) -> Result<Response, ApiError> {
     let payload = parse_csv_payload(multipart).await?;
-    let validation = validate_payload(&payload.schema_id, &payload.csv_bytes)?;
+    let data_dir = state.storage.paths().root();
+    let validation = validate_payload(&payload.schema_id, &payload.csv_bytes, data_dir)?;
 
     if !validation.valid {
         let response = DataValidateResponse {
@@ -443,11 +409,10 @@ pub async fn data_query(ReadOnlyToken(token): ReadOnlyToken) -> Json<DataQueryRe
     })
 }
 
-pub(crate) fn validate_payload(schema_id: &str, csv_bytes: &[u8]) -> Result<ValidationSummary, ApiError> {
-    let schema = schema_for_id(schema_id).ok_or_else(|| {
-        let supported = supported_schema_ids().join(", ");
+pub(crate) fn validate_payload(schema_id: &str, csv_bytes: &[u8], data_dir: &std::path::Path) -> Result<ValidationSummary, ApiError> {
+    let schema = schema_for_id(schema_id, data_dir).ok_or_else(|| {
         ApiError::bad_request(format!(
-            "unsupported schema_id '{schema_id}'. Supported schema IDs: {supported}"
+            "schema '{schema_id}' not found — upload it to the enclave first"
         ))
     })?;
 
@@ -458,7 +423,7 @@ pub(crate) async fn parse_csv_payload(multipart: Multipart) -> Result<ParsedCsvP
     let input = parse_multipart_fields(multipart).await?;
     let schema_id = input
         .schema_id
-        .unwrap_or_else(|| DEFAULT_SCHEMA_ID.to_string());
+        .ok_or_else(|| ApiError::bad_request("schema_id is required"))?;
 
     // Only encrypted uploads are accepted — plaintext file uploads are rejected.
     if input.file.is_some() {

@@ -16,15 +16,13 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use solana_sdk::{
-    pubkey::Pubkey,
-    signer::{keypair::Keypair, Signer},
-};
+use solana_keypair::Keypair;
+use solana_pubkey::Pubkey;
+use solana_signer::Signer;
 use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::{info, warn};
 
-use crate::audit_log;
 use crate::auth::UserToken;
 use crate::blockchain::drt::{
     accounts::{fetch_pool, find_drt_in_pool},
@@ -35,7 +33,7 @@ use crate::blockchain::drt::{
     validation::validate_create_pool_request,
 };
 use crate::blockchain::signing::keypair_from_bytes_verified;
-use crate::data_validation::schema_for_id;
+// Schema validation removed — schemas are uploaded to the enclave separately.
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage::audit::AuditEventType;
@@ -79,11 +77,9 @@ pub(crate) fn load_wallet_keypair(
 pub(crate) async fn sign_send_and_parse(
     state: &AppState,
     keypair: &Keypair,
-    instructions: Vec<solana_sdk::instruction::Instruction>,
-    commitment: solana_commitment_config::CommitmentConfig,
+    instructions: Vec<solana_instruction::Instruction>,
+    commitment: &str,
 ) -> Result<(String, Vec<DrtEvent>), ApiError> {
-    use solana_commitment_config::CommitmentConfig;
-
     let rpc = state.solana_client.rpc();
     let recent_blockhash = rpc
         .get_latest_blockhash()
@@ -99,33 +95,11 @@ pub(crate) async fn sign_send_and_parse(
         .await
         .map_err(|e| ApiError::service_unavailable(format!("transaction send failed: {e}")))?;
 
-    // Poll until the requested commitment level is reached.
-    let timeout = if commitment == CommitmentConfig::finalized() {
-        std::time::Duration::from_secs(60)
-    } else {
-        std::time::Duration::from_secs(30)
-    };
-    let poll_interval = if commitment == CommitmentConfig::finalized() {
-        std::time::Duration::from_millis(1000)
-    } else {
-        std::time::Duration::from_millis(400)
-    };
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > timeout {
-            return Err(ApiError::service_unavailable(format!(
-                "transaction confirmation timed out ({timeout:?}) at {:?}",
-                commitment.commitment
-            )));
-        }
-        match rpc
-            .confirm_transaction_with_commitment(&signature, commitment)
-            .await
-        {
-            Ok(resp) if resp.value => break,
-            _ => tokio::time::sleep(poll_interval).await,
-        }
-    }
+    // Wait for the requested commitment level using the shared helper.
+    state
+        .solana_client
+        .await_confirmation(&signature, commitment)
+        .await?;
 
     let sig_str = signature.to_string();
 
@@ -186,13 +160,9 @@ pub async fn create_pool(
     // Validate all inputs.
     let drt_configs = validate_create_pool_request(&payload.pool_name, &payload.drt_configs)?;
 
-    // Validate schema_id.
-    if schema_for_id(&payload.schema_id).is_none() {
-        return Err(ApiError::bad_request(format!(
-            "unsupported schema_id: {}",
-            payload.schema_id
-        )));
-    }
+    // Note: schema_id is recorded in pool metadata but not validated here.
+    // The schema must be uploaded to the enclave (POST /v1/drt/pools/{pda}/schema)
+    // before the pool can be initialized.
 
     // Load wallet.
     let repo = WalletRepository::new(&state.storage);
@@ -217,7 +187,7 @@ pub async fn create_pool(
         &state,
         &keypair,
         instructions,
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        "confirmed",
     )
     .await?;
 
@@ -255,6 +225,10 @@ pub async fn create_pool(
                 );
                 bootstrap_warning = true;
             }
+            // Dual-write: persist pool metadata in redb for O(1) lookups.
+            if let Err(e) = state.tx_db.upsert_pool_meta(&meta) {
+                warn!(pool = %pool_pda_str, error = %e, "Failed to write pool meta to redb");
+            }
         }
         Err(e) => {
             warn!(
@@ -280,6 +254,7 @@ pub async fn create_pool(
     let audit_event = crate::storage::audit::AuditEvent::new(AuditEventType::PoolCreated)
         .with_user(&token.sub)
         .with_resource("drt_pool", &pool_pda_str)
+        .with_pool_pda(&pool_pda_str)
         .with_details(serde_json::json!({
             "pool_pda": pool_pda_str,
             "pool_name": payload.pool_name,
@@ -289,6 +264,7 @@ pub async fn create_pool(
             "state_transition": "created -> needs_init"
         }));
     crate::storage::audit::AuditRepository::new(&state.storage)
+        .with_tx_db(&state.tx_db)
         .log(&audit_event)
         .await;
 
@@ -436,7 +412,7 @@ pub async fn buy_drt(
         &state,
         &keypair,
         vec![ix],
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        "confirmed",
     )
     .await?;
 
@@ -465,13 +441,21 @@ pub async fn buy_drt(
         "DRT purchased"
     );
 
-    audit_log!(
-        &state.storage,
-        AuditEventType::TransactionBroadcast,
-        &token.sub,
-        "drt_buy",
-        &sig_str
-    );
+    {
+        let evt = crate::storage::audit::AuditEvent::new(AuditEventType::DrtPurchased)
+            .with_user(&token.sub)
+            .with_resource("drt_buy", &sig_str)
+            .with_pool_pda(&pool_pda.to_string())
+            .with_details(serde_json::json!({
+                "drt_type": payload.drt_type,
+                "amount": payload.amount,
+                "tx_signature": sig_str,
+            }));
+        crate::storage::audit::AuditRepository::new(&state.storage)
+            .with_tx_db(&state.tx_db)
+            .log(&evt)
+            .await;
+    }
 
     Ok(Json(BuyDrtResponse {
         signature: sig_str.clone(),
@@ -527,7 +511,7 @@ pub async fn redeem_drt(
         &state,
         &keypair,
         vec![ix],
-        solana_commitment_config::CommitmentConfig::finalized(),
+        "finalized",
     )
     .await?;
 
@@ -557,13 +541,20 @@ pub async fn redeem_drt(
         "DRT redeemed"
     );
 
-    audit_log!(
-        &state.storage,
-        AuditEventType::TransactionBroadcast,
-        &token.sub,
-        "drt_redeem",
-        &sig_str
-    );
+    {
+        let evt = crate::storage::audit::AuditEvent::new(AuditEventType::DrtRedeemed)
+            .with_user(&token.sub)
+            .with_resource("drt_redeem", &sig_str)
+            .with_pool_pda(&pool_pda.to_string())
+            .with_details(serde_json::json!({
+                "drt_type": payload.drt_type,
+                "tx_signature": sig_str,
+            }));
+        crate::storage::audit::AuditRepository::new(&state.storage)
+            .with_tx_db(&state.tx_db)
+            .log(&evt)
+            .await;
+    }
 
     Ok(Json(RedeemDrtResponse {
         signature: sig_str.clone(),
@@ -619,7 +610,7 @@ pub async fn close_pool(
         &state,
         &keypair,
         vec![ix],
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        "confirmed",
     )
     .await?;
 
@@ -629,13 +620,24 @@ pub async fn close_pool(
         "DRT pool closed"
     );
 
-    audit_log!(
-        &state.storage,
-        AuditEventType::TransactionBroadcast,
-        &token.sub,
-        "drt_close",
-        &pool_pda.to_string()
-    );
+    // Remove pool metadata from redb index.
+    if let Err(e) = state.tx_db.delete_pool_meta(&pool_pda_str) {
+        tracing::warn!(error = %e, "Failed to delete pool meta from tx database");
+    }
+
+    {
+        let evt = crate::storage::audit::AuditEvent::new(AuditEventType::PoolClosed)
+            .with_user(&token.sub)
+            .with_resource("drt_pool", &pool_pda.to_string())
+            .with_pool_pda(&pool_pda.to_string())
+            .with_details(serde_json::json!({
+                "tx_signature": sig_str,
+            }));
+        crate::storage::audit::AuditRepository::new(&state.storage)
+            .with_tx_db(&state.tx_db)
+            .log(&evt)
+            .await;
+    }
 
     Ok(Json(ClosePoolResponse {
         signature: sig_str.clone(),
@@ -670,28 +672,25 @@ pub async fn get_drt_balance(
     let pool_pda = Pubkey::from_str(&pool_pda_str)
         .map_err(|_| ApiError::bad_request("invalid pool PDA address"))?;
 
-    // We need the user's wallet to derive their ATA. Use first active wallet.
-    let repo = WalletRepository::new(&state.storage);
-    let wallets = repo.list_by_owner(&token.sub)?;
-    let wallet = wallets
-        .first()
-        .ok_or_else(|| ApiError::bad_request("no active wallet found for user"))?;
-    let user_pubkey = Pubkey::from_str(&wallet.public_address)
-        .map_err(|_| ApiError::internal("invalid stored wallet address"))?;
-
     // Fetch pool to get mint.
     let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
     let drt = find_drt_in_pool(&pool, &drt_type)?;
 
-    let user_ata = derive_user_ata(&user_pubkey, &drt.mint);
     let vault_ata = derive_vault_ata(&pool_pda, &drt.mint);
-
     let rpc = state.solana_client.rpc();
 
-    // Fetch user balance (may not exist yet → 0).
-    let user_balance = match rpc.get_token_account_balance(&user_ata).await {
-        Ok(b) => b.amount.parse::<u64>().unwrap_or(0),
-        Err(_) => 0,
+    // Try to get user's wallet; if none exists, user balance is simply 0.
+    let user_balance = match super::get_active_wallet_for_user(&state, &token.sub) {
+        Ok(wallet) => {
+            let user_pubkey = Pubkey::from_str(&wallet.public_address)
+                .map_err(|_| ApiError::internal("invalid stored wallet address"))?;
+            let user_ata = derive_user_ata(&user_pubkey, &drt.mint);
+            match rpc.get_token_account_balance(&user_ata).await {
+                Ok(b) => b.amount.parse::<u64>().unwrap_or(0),
+                Err(_) => 0,
+            }
+        }
+        Err(_) => 0, // No wallet → 0 balance
     };
 
     // Fetch vault balance.

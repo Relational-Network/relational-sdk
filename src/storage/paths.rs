@@ -58,6 +58,13 @@ impl StoragePaths {
         self.audit_dir().join(format!("{date}.jsonl"))
     }
 
+    // ── Schemas ───────────────────────────────────────────────────
+
+    /// `/data/schemas/`
+    pub fn schemas_dir(&self) -> PathBuf {
+        self.root.join("schemas")
+    }
+
     // ── Pools ─────────────────────────────────────────────────────
 
     /// `/data/pools/`
