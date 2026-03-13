@@ -427,6 +427,8 @@ pub async fn upload_schema(
     // Save schema to disk.
     let data_dir = state.storage.paths().root();
     let field_count = payload.fields.len();
+    // TODO, save schema with UUID to prevent overwrite if multiple pools
+    // use the same schema_id. For now we assume schema_id is unique across all pools.
     crate::data_validation::save_schema(&payload.schema_id, &payload.fields, data_dir)
         .map_err(ApiError::internal)?;
 
