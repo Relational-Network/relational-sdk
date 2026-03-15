@@ -120,6 +120,19 @@ pub async fn create_wallet(
         tracing::warn!(error = %e, "Failed to register address in tx database");
     }
 
+    // Register owner→wallet mapping (enforces 1-wallet-per-user).
+    match state.tx_db.register_wallet_owner(&token.sub, &wallet_id) {
+        Ok(()) => {}
+        Err(crate::storage::tx_database::TxDbError::DuplicateWallet(existing)) => {
+            return Err(ApiError::bad_request(format!(
+                "user already has a wallet: {existing}"
+            )));
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to register wallet owner in tx database");
+        }
+    }
+
     info!(
         wallet_id = %wallet_id,
         address = %public_address,
@@ -129,6 +142,7 @@ pub async fn create_wallet(
 
     audit_log!(
         &state.storage,
+        &state.tx_db,
         AuditEventType::WalletCreated,
         &token.sub,
         "wallet",
@@ -166,7 +180,16 @@ pub async fn list_wallets(
     State(state): State<AppState>,
 ) -> Result<Json<ListWalletsResponse>, ApiError> {
     let repo = WalletRepository::new(&state.storage);
-    let wallets = repo.list_by_owner(&token.sub)?;
+
+    // O(1) lookup via redb index instead of O(W) filesystem scan.
+    let wallets = match state.tx_db.get_wallet_id_by_owner(&token.sub)? {
+        Some(wallet_id) => match repo.get(&wallet_id) {
+            Ok(meta) if meta.status != WalletStatus::Deleted => vec![meta],
+            _ => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+
     let total = wallets.len();
     let wallet_responses: Vec<WalletResponse> =
         wallets.into_iter().map(WalletResponse::from).collect();
@@ -240,6 +263,11 @@ pub async fn delete_wallet(
 
     repo.soft_delete(&wallet_id)?;
 
+    // Remove owner → wallet mapping so user can create a new wallet.
+    if let Err(e) = state.tx_db.remove_wallet_owner(&token.sub) {
+        tracing::warn!(error = %e, "Failed to remove wallet owner from tx database");
+    }
+
     info!(
         wallet_id = %wallet_id,
         owner = %token.sub,
@@ -248,6 +276,7 @@ pub async fn delete_wallet(
 
     audit_log!(
         &state.storage,
+        &state.tx_db,
         AuditEventType::WalletDeleted,
         &token.sub,
         "wallet",

@@ -12,7 +12,6 @@ rust-version = "1.92"
 
 [features]
 default = []
-dev = []  # Enables dev-mode logging
 
 [dependencies]
 # ── Web framework ──────────────────────────────────────────────────
@@ -21,7 +20,6 @@ axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["request-id", "set-header", "trace"] }
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "signal"] }
-tokio-util = { version = "0.7", features = ["rt"] }
 
 # ── Serialization ──────────────────────────────────────────────────
 serde = { version = "1.0.228", features = ["derive"] }
@@ -32,7 +30,7 @@ utoipa = { version = "5.4.0", features = ["axum_extras", "chrono"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 
 # ── TLS & Crypto ───────────────────────────────────────────────────
-rustls = { version = "0.23.36", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.36", default-features = false, features = ["aws-lc-rs"] }
 # CRITICAL: Only enable p256 for ES256 (ECDSA P-256) - NEVER use rust_crypto or rsa features!
 # The rsa crate has unfixed vulnerability RUSTSEC-2023-0071 (Marvin Attack)
 # aws_lc_rs provides CryptoProvider without the vulnerable rsa crate (uses AWS-LC/BoringSSL)
@@ -45,7 +43,7 @@ hkdf = "0.12.4"
 aes-gcm = "0.10.3"
 
 # ── HTTP client ────────────────────────────────────────────────────
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "json"] }
 
 # ── Observability ──────────────────────────────────────────────────
 tracing = "0.1"
@@ -54,25 +52,28 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # ── Utilities ──────────────────────────────────────────────────────
 uuid = { version = "1.16", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-url = "2.5"
-bs58 = "0.5"
 csv = "1.4.0"
 
-# ── Solana ─────────────────────────────────────────────────────────
-solana-sdk = "4.0.1"
-solana-client = "3.1.9"
-solana-transaction-status = "3.1.9"
-spl-token = "9.0.0"
-spl-associated-token-account = "8.0.0"
-# Solana SDK v4 split these into separate crates; versions must match solana-client v3's deps:
-solana-system-interface = "2.0.0"
-solana-transaction = "3.1.0"
-solana-message = "3.1.0"
-solana-commitment-config = "3.1"# ── Borsh serialization (DRT smart contract) ─────────────────
-borsh = "1"
+# ── Solana (granular) ──────────────────────────────────────────────
+# Replaces monolithic solana-sdk + solana-client + spl-token + spl-ata
+# with granular crates and inline instruction builders.
+# SPL crates replaced with ~40 lines in blockchain/spl_token.rs.
+solana-pubkey = { version = "4.1", features = ["sha2", "curve25519", "borsh"] }
+solana-keypair = "3.1"
+solana-signer = "3"
+solana-signature = "3.3"
+solana-hash = "4.2"
+solana-instruction = "3.2"
+solana-transaction = { version = "4", features = ["serde", "blake3"] }
+solana-message = { version = "4", features = ["serde"] }
+solana-system-interface = { version = "3.1", features = ["bincode"] }
+bincode = "1.3"
+# ── Borsh serialization (DRT smart contract) ─────────────────
+borsh = { version = "1", features = ["derive"] }
 hex = "0.4"
 # ── Embedded database ─────────────────────────────────────────────
 redb = "3.1"
 
 # ── In-process cache ──────────────────────────────────────────────
 lru = "0.16"
+dashmap = "6"

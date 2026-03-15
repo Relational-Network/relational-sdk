@@ -7,18 +7,21 @@ use axum::Json;
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use crate::auth::UserToken;
+use crate::auth::ReadOnlyToken;
 
 /// Response for `GET /v1/users/me`.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UserMeResponse {
     /// User identifier (from JWT `sub` claim).
     pub user_id: String,
-    /// Role (admin, user, read_only).
+    /// Role (admin, user, analyst, read_only).
     pub role: String,
 }
 
 /// Return the authenticated user's identity and role.
+///
+/// Uses `ReadOnlyToken` so that **any** authenticated user (including `analyst`)
+/// can query their own identity — Phase 0.3 requirement.
 #[utoipa::path(
     get,
     path = "/v1/users/me",
@@ -31,7 +34,7 @@ pub struct UserMeResponse {
         (status = 401, description = "Unauthorized"),
     )
 )]
-pub async fn get_me(UserToken(token): UserToken) -> Json<UserMeResponse> {
+pub async fn get_me(ReadOnlyToken(token): ReadOnlyToken) -> Json<UserMeResponse> {
     Json(UserMeResponse {
         user_id: token.sub,
         role: token.role,

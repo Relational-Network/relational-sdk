@@ -96,7 +96,12 @@ impl EncryptedStorage {
 
     /// Create required top-level directories. Call once at server startup.
     pub fn initialize(&mut self) -> StorageResult<()> {
-        let dirs = [self.paths.wallets_dir(), self.paths.audit_dir()];
+        let dirs = [
+            self.paths.wallets_dir(),
+            self.paths.audit_dir(),
+            self.paths.pools_dir(),
+            self.paths.schemas_dir(),
+        ];
         for dir in &dirs {
             fs::create_dir_all(dir)?;
             debug!(path = %dir.display(), "Ensured storage directory");

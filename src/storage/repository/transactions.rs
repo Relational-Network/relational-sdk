@@ -37,6 +37,9 @@ pub struct StoredTransaction {
     pub from: String,
     pub to: String,
     pub amount: String,
+    /// Precise amount in lamports (1 SOL = 1_000_000_000 lamports).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount_lamports: Option<u64>,
     pub token: TokenType,
     pub network: String,
     pub status: TxStatus,

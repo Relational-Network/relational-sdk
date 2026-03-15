@@ -60,6 +60,12 @@ pub struct AdminWalletEntry {
 pub struct AuditQuery {
     /// Date in `YYYY-MM-DD` format.
     pub date: Option<String>,
+    /// Maximum number of events to return (default 50, max 200).
+    #[serde(default = "super::default_page_limit")]
+    pub limit: usize,
+    /// Offset for pagination (default 0).
+    #[serde(default)]
+    pub offset: usize,
 }
 
 /// Audit log response.
@@ -116,6 +122,7 @@ pub async fn get_wallet_stats(
 
     audit_log!(
         &state.storage,
+        &state.tx_db,
         AuditEventType::AdminAccess,
         &token.sub,
         "system",
@@ -136,8 +143,9 @@ pub async fn get_wallet_stats(
     path = "/v1/admin/wallets",
     tag = "Admin",
     summary = "List all wallets (admin)",
-    description = "Returns all wallets across all users. Admin only.",
+    description = "Returns all wallets across all users with pagination. Admin only.",
     security(("bearer_auth" = [])),
+    params(super::PaginationQuery),
     responses(
         (status = 200, description = "All wallets", body = AdminListWalletsResponse),
         (status = 401, description = "Unauthorized"),
@@ -147,13 +155,17 @@ pub async fn get_wallet_stats(
 pub async fn list_all_wallets(
     AdminToken(token): AdminToken,
     State(state): State<AppState>,
+    Query(pagination): Query<super::PaginationQuery>,
 ) -> Result<Json<AdminListWalletsResponse>, ApiError> {
     let repo = WalletRepository::new(&state.storage);
     let all = repo.list_all_wallets()?;
     let total = all.len();
 
+    let limit = pagination.clamped_limit();
     let entries: Vec<AdminWalletEntry> = all
         .into_iter()
+        .skip(pagination.offset)
+        .take(limit)
         .map(|w| AdminWalletEntry {
             owner_user_id: w.owner_user_id.clone(),
             wallet: WalletResponse::from(w),
@@ -162,6 +174,7 @@ pub async fn list_all_wallets(
 
     audit_log!(
         &state.storage,
+        &state.tx_db,
         AuditEventType::AdminAccess,
         &token.sub,
         "system",
@@ -202,8 +215,12 @@ pub async fn query_audit_logs(
     chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d")
         .map_err(|_| ApiError::bad_request("date must be in YYYY-MM-DD format"))?;
 
-    let audit = AuditRepository::new(&state.storage);
-    let events = audit.read_verified_events(&date);
+    // Query from redb audit index (O(k) prefix scan by date).
+    let limit = query.limit.clamp(1, 200);
+    let events = state
+        .tx_db
+        .list_audit_by_date(&date, limit, query.offset)
+        .map_err(|e| ApiError::internal(format!("failed to query audit events: {e}")))?;
     let count = events.len();
 
     Ok(Json(AuditEventsResponse { events, count }))
@@ -250,6 +267,7 @@ pub async fn suspend_wallet(
 
     audit_log!(
         &state.storage,
+        &state.tx_db,
         AuditEventType::AdminAccess,
         &token.sub,
         "wallet",
@@ -303,6 +321,7 @@ pub async fn activate_wallet(
 
     audit_log!(
         &state.storage,
+        &state.tx_db,
         AuditEventType::AdminAccess,
         &token.sub,
         "wallet",
@@ -313,4 +332,70 @@ pub async fn activate_wallet(
         wallet_id,
         new_status: "active".to_string(),
     }))
+}
+
+// ============================================================================
+// Role change audit logging
+// ============================================================================
+
+/// Request body for logging a role change.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct LogRoleChangeRequest {
+    /// Clerk user ID of the target user.
+    pub target_user_id: String,
+    /// Previous role (before the change).
+    pub old_role: String,
+    /// New role (after the change).
+    pub new_role: String,
+}
+
+/// Response for role change audit logging.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LogRoleChangeResponse {
+    pub logged: bool,
+}
+
+/// Log a role assignment change to the enclave audit trail.
+///
+/// Called by the dashboard after updating a user's role via Clerk API.
+/// Emits a `RoleAssigned` audit event with structured details.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/log-role-change",
+    tag = "Admin",
+    summary = "Log role change",
+    description = "Record a role assignment change in the enclave audit trail. Called after updating Clerk publicMetadata.",
+    security(("bearer_auth" = [])),
+    request_body = LogRoleChangeRequest,
+    responses(
+        (status = 200, description = "Event logged", body = LogRoleChangeResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin role required"),
+    )
+)]
+pub async fn log_role_change(
+    AdminToken(token): AdminToken,
+    State(state): State<AppState>,
+    Json(payload): Json<LogRoleChangeRequest>,
+) -> Json<LogRoleChangeResponse> {
+    let audit_event = AuditEvent::new(AuditEventType::RoleAssigned)
+        .with_user(&token.sub)
+        .with_resource("user", &payload.target_user_id)
+        .with_details(serde_json::json!({
+            "target_user": payload.target_user_id,
+            "old_role": payload.old_role,
+            "new_role": payload.new_role,
+            "assigned_by": token.sub
+        }));
+    AuditRepository::new(&state.storage).log(&audit_event).await;
+
+    info!(
+        admin = %token.sub,
+        target = %payload.target_user_id,
+        old_role = %payload.old_role,
+        new_role = %payload.new_role,
+        "Role assignment logged"
+    );
+
+    Json(LogRoleChangeResponse { logged: true })
 }

@@ -9,7 +9,7 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use solana_sdk::pubkey::Pubkey;
+use solana_pubkey::Pubkey;
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
@@ -156,6 +156,13 @@ pub struct CreatePoolRequest {
     pub pool_name: String,
     /// One or more DRT configurations (max 20).
     pub drt_configs: Vec<DrtInitConfigRequest>,
+    /// Schema for CSV validation (default: `"pilot_v1"`).
+    #[serde(default = "default_schema_id")]
+    pub schema_id: String,
+}
+
+fn default_schema_id() -> String {
+    "pilot_v1".to_string()
 }
 
 /// Create-pool response.
@@ -169,6 +176,11 @@ pub struct CreatePoolResponse {
     pub mints: HashMap<String, String>,
     /// Solana Explorer URL.
     pub explorer_url: String,
+    /// Pool lifecycle state (`"needs_init"` until initial dataset is seeded).
+    pub state: String,
+    /// True if enclave-side directory creation failed after on-chain success.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bootstrap_warning: bool,
 }
 
 /// Buy-DRT request body.

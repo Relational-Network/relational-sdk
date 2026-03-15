@@ -6,8 +6,15 @@ SGX enclave server with RA-TLS, JWT validation, and role-based access control (R
 
 - **RA-TLS (DCAP)**: TLS certificates bound to SGX attestation
 - **JWT Validation**: Validates AVS-issued tokens with JWKS caching
-- **RBAC**: Role-based access control (admin, user, read_only)
+- **RBAC**: Role-based access control (admin, user, analyst, read_only)
 - **WebCrypto Ready**: Exposes P-256 public key for browser-side encryption
+- **Custodial Wallets**: Create/manage Solana wallets (1 per user, enforced via redb index)
+- **DRT Pools**: Create, buy, redeem, and close Data Rights Token pools on-chain
+- **Credential Issuance**: Upload schemas, issue/revoke credentials, full issuance log
+- **Audit Trail**: HMAC-signed JSONL events + redb-indexed dual-write for O(k) queries
+- **Embedded Database**: 13 redb tables for wallets, pools, issuance, revocations, and audit
+- **Pagination**: All list endpoints support `limit`/`offset` query parameters
+- **Swagger UI**: Auto-generated OpenAPI docs at `/docs`
 
 ---
 
@@ -216,6 +223,49 @@ Health endpoints are unversioned; all others use `/v1/` prefix.
 - `POST /v1/data/upload` — user or admin
 - `GET /v1/data/query` — read_only, user, or admin
 
+### User & Wallet
+- `GET  /v1/users/me` — current user identity
+- `POST /v1/wallets` — create wallet (one per user)
+- `GET  /v1/wallets` — list caller's wallets
+- `GET  /v1/wallets/{id}` — get wallet
+- `DELETE /v1/wallets/{id}` — soft-delete wallet
+
+### Balance & Transactions
+- `GET  /v1/wallets/{id}/balance` — SPL token + SOL balance
+- `POST /v1/wallets/{id}/estimate` — estimate transaction fee
+- `POST /v1/wallets/{id}/send` — send SOL/SPL
+- `GET  /v1/wallets/{id}/transactions` — list transactions
+- `GET  /v1/wallets/{id}/transactions/{sig}` — transaction status
+
+### DRT Pools
+- `POST /v1/drt/pools` — create pool on-chain
+- `GET  /v1/drt/pools/{pda}` — get pool info
+- `GET  /v1/drt/pools/by-owner/{pubkey}/{name}` — resolve pool by owner
+- `POST /v1/drt/pools/{pda}/buy` — buy DRT
+- `POST /v1/drt/pools/{pda}/redeem` — redeem DRT
+- `POST /v1/drt/pools/{pda}/close` — close pool
+- `GET  /v1/drt/pools/{pda}/balance/{type}` — DRT balance
+- `GET  /v1/drt/events/{sig}` — transaction events
+
+### Credentials (pool owner, admin)
+- `POST /v1/drt/pools/{pda}/schema` — upload CSV schema
+- `POST /v1/drt/pools/{pda}/initialize` — seed initial dataset
+- `POST /v1/drt/pools/{pda}/issue` — issue credentials (redeems append DRT)
+- `POST /v1/drt/pools/{pda}/revoke` — revoke credentials
+- `GET  /v1/drt/pools/{pda}/revocations` — list revocations (paginated)
+- `GET  /v1/drt/pools/{pda}/audit` — pool-scoped audit log (paginated)
+- `GET  /v1/drt/pools/{pda}/summary` — pool metadata + on-chain state
+- `GET  /v1/drt/pools/{pda}/issuance-log` — issuance records (paginated)
+- `GET  /v1/drt/pools/by-wallet/{id}` — pools by wallet (paginated)
+- `GET  /v1/drt/pools/list` — all pools with filtering, sorting, pagination
+
+### Admin
+- `GET  /v1/admin/wallet-stats` — aggregate wallet stats
+- `GET  /v1/admin/wallets` — list all wallets (paginated)
+- `GET  /v1/admin/audit/events` — query audit log by date (paginated)
+- `POST /v1/admin/wallets/{id}/suspend` — suspend wallet
+- `POST /v1/admin/wallets/{id}/activate` — reactivate wallet
+
 ### Docs
 - `GET /docs` — Swagger UI
 - `GET /api-doc/openapi.json` — OpenAPI spec
@@ -273,7 +323,7 @@ See [`attestation-client/README.md`](attestation-client/README.md) for details.
 
 | Module | Description |
 |--------|-------------|
-| `main.rs` | Entry point, router setup, CORS, security headers |
+| `main.rs` | Entry point, router setup, CORS, security headers, OpenAPI |
 | `config.rs` | Configuration constants, env var helpers (CORS, Solana, storage) |
 | `auth.rs` | JWT validation, JWKS caching (10s timeout), RBAC extractors |
 | `crypto.rs` | Enclave keypair, JWK/JWKS types |
@@ -283,16 +333,19 @@ See [`attestation-client/README.md`](attestation-client/README.md) for details.
 | `health.rs` | /health, /health/live, /health/ready |
 | `state.rs` | AppState (JWKS cache, storage, Solana client, tx DB) |
 | `tls.rs` | RA-TLS PEM loading + normalization |
-| `indexer/` | Background Solana transaction poller |
-| `api/admin.rs` | Wallet stats, list all, audit query, suspend/activate |
+| `indexer/` | Background Solana transaction poller with sync cooldown |
+| `api/mod.rs` | Router assembly, shared pagination, wallet lookup helpers |
+| `api/admin.rs` | Wallet stats, list all (paginated), audit query, suspend/activate |
 | `api/balance.rs` | SPL token + native SOL balance |
+| `api/credentials.rs` | Credential issuance, revocation, pool discovery (paginated) |
 | `api/pools.rs` | DRT pool CRUD: create/get/buy/redeem/close |
 | `api/transactions.rs` | Estimate fee, send, list, status |
 | `api/users.rs` | GET /v1/me — user identity |
-| `api/wallets.rs` | Create/list/get/delete wallet |
+| `api/wallets.rs` | Create/list/get/delete wallet (1-wallet-per-user enforced) |
 | `blockchain/` | SolanaClient, signing, SPL token ops, DRT contract |
-| `storage/audit.rs` | Per-wallet audit event log |
-| `storage/tx_database.rs` | redb-backed durable transaction store |
+| `storage/audit.rs` | Audit event log with HMAC integrity + redb dual-write |
+| `storage/pool_metadata.rs` | PoolMetadata struct + PoolState lifecycle enum |
+| `storage/tx_database.rs` | redb-backed durable store (13 tables: wallets, pools, audit, etc.) |
 | `storage/tx_cache.rs` | LRU cache (128 entries, 30s TTL) |
 | `storage/repository/` | Typed read/write for wallets, transactions |
 

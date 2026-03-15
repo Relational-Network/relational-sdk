@@ -4,10 +4,10 @@
 //! On-chain account deserialization for DRT program accounts.
 
 use borsh::BorshDeserialize;
-use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::pubkey::Pubkey;
+use solana_pubkey::Pubkey;
 
 use super::types::{DrtConfig, Pool, DISC_POOL_ACCOUNT};
+use crate::blockchain::rpc::JsonRpcClient;
 use crate::error::ApiError;
 
 /// Maximum expected size of a Pool account (after discriminator).
@@ -20,13 +20,13 @@ const MAX_POOL_DATA_SIZE: usize = 10 * 1024;
 /// Fetch and deserialize a Pool account from chain.
 ///
 /// Verifies the 8-byte Anchor discriminator before Borsh deserialization.
-pub async fn fetch_pool(rpc: &RpcClient, pool_pda: &Pubkey) -> Result<Pool, ApiError> {
-    let account = rpc
-        .get_account(pool_pda)
+pub async fn fetch_pool(rpc: &JsonRpcClient, pool_pda: &Pubkey) -> Result<Pool, ApiError> {
+    let data = rpc
+        .get_account_data(pool_pda)
         .await
-        .map_err(|e| ApiError::not_found(format!("pool account {pool_pda} not found: {e}")))?;
+        .map_err(|e| ApiError::not_found(format!("pool account {pool_pda} not found: {e}")))?
+        .ok_or_else(|| ApiError::not_found(format!("pool account {pool_pda} not found")))?;
 
-    let data = &account.data;
     if data.len() < 8 {
         return Err(ApiError::internal("pool account data too short"));
     }

@@ -153,6 +153,7 @@ impl<'a> WalletRepository<'a> {
     }
 
     /// List all wallets owned by the given user (active + suspended, not deleted).
+    #[allow(dead_code)] //TODO
     pub fn list_by_owner(&self, user_id: &str) -> StorageResult<Vec<WalletMetadata>> {
         self.list_all_wallets().map(|wallets| {
             wallets

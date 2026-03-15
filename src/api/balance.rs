@@ -3,8 +3,7 @@
 
 //! Balance query endpoints.
 //!
-//! - `GET /v1/wallets/{id}/balance`        — full balance (native + SPL)
-//! - `GET /v1/wallets/{id}/balance/native` — native SOL only
+//! - `GET /v1/wallets/{id}/balance` — full balance (native + SPL)
 
 use axum::{
     extract::{Path, State},
@@ -32,14 +31,6 @@ pub struct BalanceResponse {
     pub address: String,
     pub network: String,
     pub balances: Vec<TokenBalance>,
-}
-
-/// Native-only balance response.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct NativeBalanceResponse {
-    pub wallet_id: String,
-    pub address: String,
-    pub balance: TokenBalance,
 }
 
 // ============================================================================
@@ -87,45 +78,5 @@ pub async fn get_balance(
         address: wallet.public_address,
         network: state.solana_client.network().name.to_string(),
         balances: vec![sol_balance],
-    }))
-}
-
-/// Get native SOL balance only.
-#[utoipa::path(
-    get,
-    path = "/v1/wallets/{wallet_id}/balance/native",
-    tag = "Balance",
-    summary = "Get native SOL balance",
-    description = "Returns only the native SOL balance for a wallet.",
-    security(("bearer_auth" = [])),
-    params(
-        ("wallet_id" = String, Path, description = "Wallet UUID"),
-    ),
-    responses(
-        (status = 200, description = "Native balance", body = NativeBalanceResponse),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Not the wallet owner"),
-        (status = 404, description = "Wallet not found"),
-        (status = 503, description = "Solana RPC unavailable"),
-    )
-)]
-pub async fn get_native_balance(
-    UserToken(token): UserToken,
-    State(state): State<AppState>,
-    Path(wallet_id): Path<String>,
-) -> Result<Json<NativeBalanceResponse>, ApiError> {
-    let repo = WalletRepository::new(&state.storage);
-    let wallet = repo.get(&wallet_id)?;
-    enforce_owner_active(&wallet, &token.sub)?;
-
-    let balance = state
-        .solana_client
-        .get_native_balance(&wallet.public_address)
-        .await?;
-
-    Ok(Json(NativeBalanceResponse {
-        wallet_id,
-        address: wallet.public_address,
-        balance,
     }))
 }

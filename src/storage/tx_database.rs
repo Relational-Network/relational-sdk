@@ -23,6 +23,29 @@ const INDEXER_STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("indexe
 /// Nonce replay protection: nonce_string → unix_timestamp (i64 LE bytes).
 const NONCES: TableDefinition<&str, &[u8]> = TableDefinition::new("nonces");
 
+// ── Phase 2: Wallet owner index ────────────────────────────────────
+/// Maps `owner_user_id` → `wallet_id` for O(1) user → wallet lookup.
+/// Enforces 1-wallet-per-user constraint.
+const WALLET_BY_OWNER: TableDefinition<&str, &str> = TableDefinition::new("wallet_by_owner");
+
+// ── Phase 3: Pool metadata & issuance ──────────────────────────────
+/// Pool metadata: `pool_pda` → PoolMetadata JSON bytes.
+const POOL_METADATA: TableDefinition<&str, &[u8]> = TableDefinition::new("pool_metadata");
+/// Pool-by-owner index: `{owner_wallet_id}|{pool_pda}` → `""` (key-only index).
+const POOL_BY_OWNER: TableDefinition<&str, &str> = TableDefinition::new("pool_by_owner");
+/// Issuance records: `{pool_pda}|{!timestamp_be}|{record_id}` → DatasetFileMeta JSON bytes.
+const ISSUANCE_RECORDS: TableDefinition<&str, &[u8]> = TableDefinition::new("issuance_records");
+/// Revocations: `{pool_pda}|{credential_id}` → RevocationEntry JSON bytes.
+const REVOCATIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("revocations");
+
+// ── Phase 4: Audit trail index ─────────────────────────────────────
+/// Audit events: `{event_id}` → AuditEvent JSON bytes.
+const AUDIT_EVENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("audit_events");
+/// Audit-by-resource index: `{resource_id}|{!timestamp_be}|{event_id}` → `""`.
+const AUDIT_BY_RESOURCE: TableDefinition<&str, &str> = TableDefinition::new("audit_by_resource");
+/// Audit-by-date index: `{YYYY-MM-DD}|{event_id}` → `""`.
+const AUDIT_BY_DATE: TableDefinition<&str, &str> = TableDefinition::new("audit_by_date");
+
 /// Result alias for tx database operations.
 pub type TxDbResult<T> = Result<T, TxDbError>;
 
@@ -38,6 +61,8 @@ pub enum TxDbError {
     Json(serde_json::Error),
     /// Client provided a tampered or invalid pagination cursor.
     InvalidCursor,
+    /// User already has a wallet (1-wallet-per-user constraint).
+    DuplicateWallet(String),
 }
 
 impl std::fmt::Display for TxDbError {
@@ -51,6 +76,7 @@ impl std::fmt::Display for TxDbError {
             Self::CommitError(e) => write!(f, "commit: {e}"),
             Self::Json(e) => write!(f, "json: {e}"),
             Self::InvalidCursor => write!(f, "invalid pagination cursor"),
+            Self::DuplicateWallet(id) => write!(f, "user already has wallet: {id}"),
         }
     }
 }
@@ -97,6 +123,9 @@ impl From<TxDbError> for crate::error::ApiError {
     fn from(e: TxDbError) -> Self {
         match &e {
             TxDbError::InvalidCursor => Self::bad_request("invalid pagination cursor"),
+            TxDbError::DuplicateWallet(id) => {
+                Self::bad_request(format!("user already has a wallet: {id}"))
+            }
             _ => {
                 tracing::error!(error = %e, "Transaction database error");
                 Self::internal("internal database error")
@@ -123,6 +152,17 @@ impl TxDatabase {
             let _ = write_txn.open_table(ADDRESS_WALLET_MAP)?;
             let _ = write_txn.open_table(INDEXER_STATE)?;
             let _ = write_txn.open_table(NONCES)?;
+            // Phase 2
+            let _ = write_txn.open_table(WALLET_BY_OWNER)?;
+            // Phase 3
+            let _ = write_txn.open_table(POOL_METADATA)?;
+            let _ = write_txn.open_table(POOL_BY_OWNER)?;
+            let _ = write_txn.open_table(ISSUANCE_RECORDS)?;
+            let _ = write_txn.open_table(REVOCATIONS)?;
+            // Phase 4
+            let _ = write_txn.open_table(AUDIT_EVENTS)?;
+            let _ = write_txn.open_table(AUDIT_BY_RESOURCE)?;
+            let _ = write_txn.open_table(AUDIT_BY_DATE)?;
         }
         write_txn.commit()?;
 
@@ -315,6 +355,441 @@ impl TxDatabase {
         Ok(())
     }
 
+    // ── Phase 2: Wallet owner index ────────────────────────────────
+
+    /// Register a user → wallet_id mapping. Returns an error if the user
+    /// already owns a wallet (1-wallet-per-user constraint).
+    pub fn register_wallet_owner(&self, owner_user_id: &str, wallet_id: &str) -> TxDbResult<()> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(WALLET_BY_OWNER)?;
+            // Enforce 1-wallet-per-user: check if user already has a wallet.
+            if let Some(existing) = table.get(owner_user_id)? {
+                let existing_id = existing.value().to_string();
+                drop(existing);
+                return Err(TxDbError::DuplicateWallet(existing_id));
+            }
+            table.insert(owner_user_id, wallet_id)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Look up the wallet_id for a user. Returns `None` if the user has no wallet.
+    pub fn get_wallet_id_by_owner(&self, owner_user_id: &str) -> TxDbResult<Option<String>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(WALLET_BY_OWNER)?;
+        Ok(table.get(owner_user_id)?.map(|v| v.value().to_string()))
+    }
+
+    /// Remove the user → wallet_id mapping (on wallet deletion).
+    pub fn remove_wallet_owner(&self, owner_user_id: &str) -> TxDbResult<()> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(WALLET_BY_OWNER)?;
+            table.remove(owner_user_id)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    // ── Phase 3: Pool metadata & issuance ──────────────────────────
+
+    /// Insert or update pool metadata in redb.
+    pub fn upsert_pool_meta(&self, meta: &super::pool_metadata::PoolMetadata) -> TxDbResult<()> {
+        let json_bytes = serde_json::to_vec(meta)?;
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(POOL_METADATA)?;
+            table.insert(meta.pool_pda.as_str(), json_bytes.as_slice())?;
+
+            // Maintain the owner index.
+            let mut idx = write_txn.open_table(POOL_BY_OWNER)?;
+            let key = format!("{}|{}", meta.owner_wallet_id, meta.pool_pda);
+            idx.insert(key.as_str(), "")?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Read pool metadata by PDA.
+    #[allow(dead_code)] // TODO
+    pub fn get_pool_meta(
+        &self,
+        pool_pda: &str,
+    ) -> TxDbResult<Option<super::pool_metadata::PoolMetadata>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(POOL_METADATA)?;
+        match table.get(pool_pda)? {
+            Some(bytes) => {
+                let meta = serde_json::from_slice(bytes.value())?;
+                Ok(Some(meta))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// List all pool metadata entries (full table scan).
+    pub fn list_all_pool_metas(&self) -> TxDbResult<Vec<super::pool_metadata::PoolMetadata>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(POOL_METADATA)?;
+        let mut result = Vec::new();
+        for entry in table.iter()? {
+            let (_k, v) = entry?;
+            if let Ok(meta) =
+                serde_json::from_slice::<super::pool_metadata::PoolMetadata>(v.value())
+            {
+                result.push(meta);
+            }
+        }
+        Ok(result)
+    }
+
+    /// List pools owned by a specific wallet (prefix scan on POOL_BY_OWNER).
+    pub fn list_pools_by_owner(
+        &self,
+        owner_wallet_id: &str,
+    ) -> TxDbResult<Vec<super::pool_metadata::PoolMetadata>> {
+        let read_txn = self.db.begin_read()?;
+        let idx = read_txn.open_table(POOL_BY_OWNER)?;
+        let meta_table = read_txn.open_table(POOL_METADATA)?;
+        let prefix = format!("{owner_wallet_id}|");
+        let mut result = Vec::new();
+
+        let range = idx.range(prefix.as_str()..)?;
+        for entry in range {
+            let (key_guard, _) = entry?;
+            let key_str = key_guard.value();
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            // Extract pool_pda from key: "owner_wallet_id|pool_pda"
+            if let Some(pool_pda) = key_str.strip_prefix(&prefix) {
+                if let Some(bytes) = meta_table.get(pool_pda)? {
+                    if let Ok(meta) =
+                        serde_json::from_slice::<super::pool_metadata::PoolMetadata>(bytes.value())
+                    {
+                        result.push(meta);
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Delete pool metadata from redb (and owner index).
+    pub fn delete_pool_meta(&self, pool_pda: &str) -> TxDbResult<()> {
+        // First, read the owner to clean up the index.
+        let owner_wallet_id = {
+            let read_txn = self.db.begin_read()?;
+            let table = read_txn.open_table(POOL_METADATA)?;
+            table.get(pool_pda)?.and_then(|bytes| {
+                serde_json::from_slice::<super::pool_metadata::PoolMetadata>(bytes.value())
+                    .ok()
+                    .map(|m| m.owner_wallet_id)
+            })
+        };
+
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut meta_table = write_txn.open_table(POOL_METADATA)?;
+            meta_table.remove(pool_pda)?;
+
+            if let Some(owner) = owner_wallet_id {
+                let mut idx = write_txn.open_table(POOL_BY_OWNER)?;
+                let key = format!("{owner}|{pool_pda}");
+                idx.remove(key.as_str())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Insert an issuance record for a pool.
+    pub fn upsert_issuance_record(
+        &self,
+        pool_pda: &str,
+        record_id: &str,
+        timestamp: i64,
+        json_bytes: &[u8],
+    ) -> TxDbResult<()> {
+        let key = make_pool_ts_key(pool_pda, timestamp, record_id);
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(ISSUANCE_RECORDS)?;
+            table.insert(key.as_str(), json_bytes)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// List issuance records for a pool with pagination (newest first).
+    pub fn list_issuance_records(
+        &self,
+        pool_pda: &str,
+        limit: usize,
+        offset: usize,
+    ) -> TxDbResult<Vec<serde_json::Value>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(ISSUANCE_RECORDS)?;
+        let prefix = format!("{pool_pda}|");
+        let mut results = Vec::new();
+        let mut skipped = 0usize;
+
+        let range = table.range(prefix.as_str()..)?;
+        for entry in range {
+            let (key_guard, val_guard) = entry?;
+            let key_str = key_guard.value();
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            if results.len() >= limit {
+                break;
+            }
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(val_guard.value()) {
+                results.push(val);
+            }
+        }
+        Ok(results)
+    }
+
+    /// Count total issuance records for a pool.
+    pub fn count_issuance_records(&self, pool_pda: &str) -> TxDbResult<usize> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(ISSUANCE_RECORDS)?;
+        let prefix = format!("{pool_pda}|");
+        let mut count = 0;
+        let range = table.range(prefix.as_str()..)?;
+        for entry in range {
+            let (key_guard, _) = entry?;
+            if !key_guard.value().starts_with(&prefix) {
+                break;
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Insert a revocation entry for a pool.
+    pub fn upsert_revocation(
+        &self,
+        pool_pda: &str,
+        credential_id: &str,
+        json_bytes: &[u8],
+    ) -> TxDbResult<()> {
+        let key = format!("{pool_pda}|{credential_id}");
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(REVOCATIONS)?;
+            table.insert(key.as_str(), json_bytes)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// List revocations for a pool with pagination.
+    pub fn list_revocations(
+        &self,
+        pool_pda: &str,
+        limit: usize,
+        offset: usize,
+    ) -> TxDbResult<Vec<serde_json::Value>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(REVOCATIONS)?;
+        let prefix = format!("{pool_pda}|");
+        let mut results = Vec::new();
+        let mut skipped = 0usize;
+
+        let range = table.range(prefix.as_str()..)?;
+        for entry in range {
+            let (key_guard, val_guard) = entry?;
+            let key_str = key_guard.value();
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            if results.len() >= limit {
+                break;
+            }
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(val_guard.value()) {
+                results.push(val);
+            }
+        }
+        Ok(results)
+    }
+
+    /// Count total revocations for a pool.
+    pub fn count_revocations(&self, pool_pda: &str) -> TxDbResult<usize> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(REVOCATIONS)?;
+        let prefix = format!("{pool_pda}|");
+        let mut count = 0;
+        let range = table.range(prefix.as_str()..)?;
+        for entry in range {
+            let (key_guard, _) = entry?;
+            if !key_guard.value().starts_with(&prefix) {
+                break;
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    // ── Phase 4: Audit trail index ─────────────────────────────────
+
+    /// Log an audit event to redb (writes to all 3 audit tables).
+    pub fn log_audit_event(&self, event: &super::audit::AuditEvent) -> TxDbResult<()> {
+        let json_bytes = serde_json::to_vec(event)?;
+        let write_txn = self.db.begin_write()?;
+        {
+            // Main event store.
+            let mut events = write_txn.open_table(AUDIT_EVENTS)?;
+            events.insert(event.event_id.as_str(), json_bytes.as_slice())?;
+
+            // Resource index (if resource_id is set).
+            if let Some(ref resource_id) = event.resource_id {
+                let mut by_resource = write_txn.open_table(AUDIT_BY_RESOURCE)?;
+                let key =
+                    make_pool_ts_key(resource_id, event.timestamp.timestamp(), &event.event_id);
+                by_resource.insert(key.as_str(), "")?;
+            }
+
+            // Date index.
+            let date = event.timestamp.format("%Y-%m-%d").to_string();
+            let mut by_date = write_txn.open_table(AUDIT_BY_DATE)?;
+            let key = format!("{date}|{}", event.event_id);
+            by_date.insert(key.as_str(), "")?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// List audit events for a resource with pagination (newest first).
+    pub fn list_audit_by_resource(
+        &self,
+        resource_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> TxDbResult<Vec<super::audit::AuditEvent>> {
+        let read_txn = self.db.begin_read()?;
+        let idx = read_txn.open_table(AUDIT_BY_RESOURCE)?;
+        let events = read_txn.open_table(AUDIT_EVENTS)?;
+        let prefix = format!("{resource_id}|");
+        let mut results = Vec::new();
+        let mut skipped = 0usize;
+
+        let range = idx.range(prefix.as_str()..)?;
+        for entry in range {
+            let (key_guard, _) = entry?;
+            let key_str = key_guard.value();
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            if results.len() >= limit {
+                break;
+            }
+            // Extract event_id: last segment after "|"
+            if let Some(event_id) = key_str.rsplit('|').next() {
+                if let Some(bytes) = events.get(event_id)? {
+                    if let Ok(ev) =
+                        serde_json::from_slice::<super::audit::AuditEvent>(bytes.value())
+                    {
+                        results.push(ev);
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Count audit events for a resource.
+    pub fn count_audit_by_resource(&self, resource_id: &str) -> TxDbResult<usize> {
+        let read_txn = self.db.begin_read()?;
+        let idx = read_txn.open_table(AUDIT_BY_RESOURCE)?;
+        let prefix = format!("{resource_id}|");
+        let mut count = 0;
+        let range = idx.range(prefix.as_str()..)?;
+        for entry in range {
+            let (key_guard, _) = entry?;
+            if !key_guard.value().starts_with(&prefix) {
+                break;
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// List audit events for a specific date with pagination.
+    pub fn list_audit_by_date(
+        &self,
+        date: &str,
+        limit: usize,
+        offset: usize,
+    ) -> TxDbResult<Vec<super::audit::AuditEvent>> {
+        let read_txn = self.db.begin_read()?;
+        let idx = read_txn.open_table(AUDIT_BY_DATE)?;
+        let events = read_txn.open_table(AUDIT_EVENTS)?;
+        let prefix = format!("{date}|");
+        let mut results = Vec::new();
+        let mut skipped = 0usize;
+
+        let range = idx.range(prefix.as_str()..)?;
+        for entry in range {
+            let (key_guard, _) = entry?;
+            let key_str = key_guard.value();
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            if results.len() >= limit {
+                break;
+            }
+            // Extract event_id from key: "YYYY-MM-DD|event_id"
+            if let Some(event_id) = key_str.strip_prefix(&prefix) {
+                if let Some(bytes) = events.get(event_id)? {
+                    if let Ok(ev) =
+                        serde_json::from_slice::<super::audit::AuditEvent>(bytes.value())
+                    {
+                        results.push(ev);
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Count audit events for a specific date.
+    #[allow(dead_code)] // TODO
+    pub fn count_audit_by_date(&self, date: &str) -> TxDbResult<usize> {
+        let read_txn = self.db.begin_read()?;
+        let idx = read_txn.open_table(AUDIT_BY_DATE)?;
+        let prefix = format!("{date}|");
+        let mut count = 0;
+        let range = idx.range(prefix.as_str()..)?;
+        for entry in range {
+            let (key_guard, _) = entry?;
+            if !key_guard.value().starts_with(&prefix) {
+                break;
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
     // ── Nonce replay protection ────────────────────────────────────
 
     /// Record a nonce. Returns `true` if the nonce was **new** (inserted),
@@ -379,6 +854,15 @@ fn make_index_key(address: &str, timestamp: i64, signature: &str) -> Vec<u8> {
     key.push(b'|');
     key.extend_from_slice(signature.as_bytes());
     key
+}
+
+/// Build a composite string key: `{prefix}|{!timestamp_be_hex}|{suffix}`.
+///
+/// Used for pool issuance records, audit indexes, etc.
+/// Timestamp is bitwise-inverted for reverse-chronological ordering.
+fn make_pool_ts_key(prefix: &str, timestamp: i64, suffix: &str) -> String {
+    let inverted_ts = !timestamp as u64;
+    format!("{prefix}|{inverted_ts:016x}|{suffix}")
 }
 
 // ── Signed pagination cursor helpers ───────────────────────────────

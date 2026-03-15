@@ -14,7 +14,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use solana_sdk::pubkey::Pubkey;
+use solana_pubkey::Pubkey;
 use std::str::FromStr;
 use tracing::{info, warn};
 use utoipa::{IntoParams, ToSchema};
@@ -252,6 +252,7 @@ pub async fn send_transaction(
             from: wallet.public_address.clone(),
             to: payload.recipient.clone(),
             amount: payload.amount.to_string(),
+            amount_lamports: Some(payload.amount),
             token: token_type,
             network: state.solana_client.network().name.to_string(),
             status: TxStatus::Confirmed,
@@ -277,6 +278,7 @@ pub async fn send_transaction(
 
     audit_log!(
         &state.storage,
+        &state.tx_db,
         AuditEventType::TransactionBroadcast,
         &token.sub,
         "wallet",
