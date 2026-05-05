@@ -47,6 +47,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::{avs_jwks_url, AVS_ISSUER, JWKS_CACHE_TTL_SECS};
 use crate::crypto::{enclave_key, Jwk, JwksResponse};
+use crate::http_client::HttpClient;
 use crate::state::AppState;
 
 /// Claims from AVS-issued attestation tokens.
@@ -125,31 +126,29 @@ pub struct JwksCache {
 
 /// Fetch JWKS from AVS and parse the decoding keys.
 pub async fn fetch_jwks(url: &str) -> Result<Vec<(String, DecodingKey)>, String> {
-    // Build HTTP client — use AVS_CA_CERT_PATH as trusted root when set,
-    // otherwise use system default CA bundle (no blanket cert bypass).
-    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10));
-
-    if let Ok(ca_path) = std::env::var("AVS_CA_CERT_PATH") {
+    // Build HTTP client — use AVS_CA_CERT_PATH as an extra trusted root when
+    // set, otherwise use the webpki bundle (no blanket cert bypass).
+    let client = if let Ok(ca_path) = std::env::var("AVS_CA_CERT_PATH") {
         let pem = std::fs::read(&ca_path)
             .map_err(|e| format!("failed to read AVS_CA_CERT_PATH ({ca_path}): {e}"))?;
-        let cert = reqwest::Certificate::from_pem(&pem)
+        let c = HttpClient::with_extra_ca_pem(&pem)
             .map_err(|e| format!("invalid PEM in AVS_CA_CERT_PATH ({ca_path}): {e}"))?;
-        builder = builder.add_root_certificate(cert);
         tracing::info!(path = %ca_path, "Loaded custom CA certificate for JWKS fetch");
+        c
+    } else {
+        HttpClient::new()
     }
-
-    let client = builder
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    .with_timeout(std::time::Duration::from_secs(10));
 
     let response = client
         .get(url)
-        .send()
         .await
         .map_err(|e| format!("failed to fetch JWKS: {e}"))?;
+    if !response.is_success() {
+        return Err(format!("JWKS fetch returned HTTP {}", response.status()));
+    }
     let jwks: JwksResponse = response
-        .json()
-        .await
+        .into_json()
         .map_err(|e| format!("failed to parse JWKS: {e}"))?;
 
     let mut keys = Vec::new();

@@ -33,6 +33,7 @@ mod data_validation;
 mod error;
 mod handlers;
 mod health;
+mod http_client;
 mod indexer;
 mod state;
 mod storage;
@@ -299,7 +300,8 @@ async fn main() {
     // Capture process start for uptime reporting.
     let _ = STARTED_AT.set(Instant::now());
 
-    // Install rustls crypto provider early — reqwest and axum-server both need it.
+    // Install rustls crypto provider early — both axum-server and our
+    // http_client (hyper-rustls) pick this up via process-global default.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     // Initialize enclave keypair.

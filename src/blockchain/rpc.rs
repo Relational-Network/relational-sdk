@@ -3,9 +3,12 @@
 
 //! Lightweight Solana JSON-RPC client.
 //!
-//! Replaces `solana-client` crate with direct HTTP calls via `reqwest`,
-//! eliminating ~300 transitive dependencies (quinn, ring, etc.).
+//! Replaces `solana-client` with direct HTTP calls over our in-house
+//! `http_client` (hyper + hyper-rustls), eliminating ~300 transitive
+//! dependencies (quinn, ring, etc.) plus the `url`/`idna`/`icu_*`
+//! chain that `reqwest` would have pulled in.
 
+use crate::http_client::HttpClient;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{de::DeserializeOwned, Deserialize};
@@ -75,7 +78,7 @@ struct RpcContext<T> {
 ///
 /// Default commitment: `confirmed` (single validator, ~400ms).
 pub struct JsonRpcClient {
-    client: reqwest::Client,
+    client: HttpClient,
     url: String,
     commitment: String,
     next_id: AtomicU64,
@@ -85,7 +88,7 @@ impl JsonRpcClient {
     /// Create a new client for the given RPC URL.
     pub fn new(url: &str, commitment: &str) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: HttpClient::new(),
             url: url.to_string(),
             commitment: commitment.to_string(),
             next_id: AtomicU64::new(1),
@@ -107,16 +110,13 @@ impl JsonRpcClient {
 
         let resp = self
             .client
-            .post(&self.url)
-            .json(&body)
-            .send()
+            .post_json(&self.url, &body)
             .await
             .map_err(|e| RpcError::new(format!("HTTP error: {e}")))?;
 
         let status = resp.status();
         let text = resp
-            .text()
-            .await
+            .into_text()
             .map_err(|e| RpcError::new(format!("response read error: {e}")))?;
 
         if !status.is_success() {

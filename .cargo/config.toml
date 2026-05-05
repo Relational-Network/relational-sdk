@@ -3,4 +3,33 @@
 
 # Emit the .d file with paths relative to the project directory, so that Make
 # understands that they refer to the same target that we wrote in the Makefile.
-build.dep-info-basedir = "."
+
+[env]
+CC = "clang"
+CXX = "clang++"
+
+[alias]
+dev-check = "check --features dev"
+dev-build = "build --features dev"
+dev-test = "test --features dev"
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[build]
+jobs = 4
+incremental = true
+# rustc-wrapper = "sccache"
+dep-info-basedir = "."
+
+[profile.dev]
+opt-level = 0
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+strip = true
