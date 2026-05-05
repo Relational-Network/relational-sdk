@@ -61,7 +61,8 @@ pub struct AuditEvent {
     pub details: Option<serde_json::Value>,
     pub success: bool,
     /// HMAC-SHA256 integrity tag over the canonical JSON of this event
-    /// (computed with `hmac` field absent). `None` for legacy events.
+    /// (computed with `hmac` field absent). `None` only transiently before
+    /// the tag is attached during write.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
     /// Correlation ID linking related operations (e.g. redeem + issue).
@@ -160,13 +161,6 @@ impl AuditEvent {
         self
     }
 
-    /// Attach a correlation ID to link related operations.
-    #[allow(dead_code)] //TODO
-    pub fn with_correlation_id(mut self, id: impl Into<String>) -> Self {
-        self.correlation_id = Some(id.into());
-        self
-    }
-
     /// Attach a pool PDA for pool-scoped events.
     pub fn with_pool_pda(mut self, pda: impl Into<String>) -> Self {
         self.pool_pda = Some(pda.into());
@@ -257,7 +251,7 @@ impl<'a> AuditRepository<'a> {
 
     /// Read only events with a valid HMAC for the given date.
     ///
-    /// Legacy events without an HMAC field are excluded.
+    /// Events missing an HMAC or whose tag does not verify are excluded.
     #[allow(dead_code)] //TODO
     pub fn read_verified_events(&self, date: &str) -> Vec<AuditEvent> {
         let path = self.storage.paths().audit_events_file(date);
@@ -293,26 +287,12 @@ impl<'a> AuditRepository<'a> {
 /// non-blocking because it uses `tokio::fs` internally.
 ///
 /// ```rust,ignore
-/// // With redb dual-write:
 /// audit_log!(storage, tx_db, AuditEventType::WalletCreated, "user_123", "wallet", "wallet_456");
-/// // Without redb (legacy, file-only):
-/// audit_log!(storage, AuditEventType::WalletCreated, "user_123", "wallet", "wallet_456");
 /// ```
 #[macro_export]
 macro_rules! audit_log {
-    // With tx_db for redb dual-write.
     ($storage:expr, $tx_db:expr, $event_type:expr, $user_id:expr, $resource_type:expr, $resource_id:expr) => {{
         let repo = $crate::storage::audit::AuditRepository::new($storage).with_tx_db($tx_db);
-        repo.log(
-            &$crate::storage::audit::AuditEvent::new($event_type)
-                .with_user($user_id)
-                .with_resource($resource_type, $resource_id),
-        )
-        .await;
-    }};
-    // Legacy: file-only write.
-    ($storage:expr, $event_type:expr, $user_id:expr, $resource_type:expr, $resource_id:expr) => {{
-        let repo = $crate::storage::audit::AuditRepository::new($storage);
         repo.log(
             &$crate::storage::audit::AuditEvent::new($event_type)
                 .with_user($user_id)
