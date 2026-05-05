@@ -16,19 +16,18 @@ dev = []
 
 [dependencies]
 # ── Web framework ──────────────────────────────────────────────────
-axum = { version = "0.8.8", features = ["multipart"] }
-axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["request-id", "set-header", "trace"] }
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "signal"] }
+axum = { version = "0.8.8", default-features =  false, features = ["multipart", "query"] }
+axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
+tower-http = { version = "0.6", default-features = false, features = ["request-id", "set-header", "trace"] }
+tokio = { version = "1.49.0", default-features = false, features = ["macros", "rt-multi-thread", "signal"] }
 
 # ── Serialization ──────────────────────────────────────────────────
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 serde_json = "1.0.149"
 
 # ── OpenAPI / Swagger ──────────────────────────────────────────────
-utoipa = { version = "5.4.0", features = ["axum_extras", "chrono"] }
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+utoipa = { version = "5.4.0", default-features = false, features = ["axum_extras", "chrono"] }
+utoipa-swagger-ui = { version = "9.0.2", default-features = false, features = ["axum"] }
 
 # ── TLS & Crypto ───────────────────────────────────────────────────
 rustls = { version = "0.23.36", default-features = false, features = ["aws-lc-rs"] }
@@ -36,12 +35,12 @@ rustls = { version = "0.23.36", default-features = false, features = ["aws-lc-rs
 # The rsa crate has unfixed vulnerability RUSTSEC-2023-0071 (Marvin Attack)
 # aws_lc_rs provides CryptoProvider without the vulnerable rsa crate (uses AWS-LC/BoringSSL)
 jsonwebtoken = { version = "10.3.0", default-features = false, features = ["use_pem", "p256", "aws_lc_rs"] }
-p256 = { version = "0.13.2", features = ["pkcs8", "ecdh"] }
-sha2 = "0.10.9"
-hmac = "0.12"
-base64 = "0.22.1"
-hkdf = "0.12.4"
-aes-gcm = "0.10.3"
+p256 = { version = "0.13.2", default-features = false, features = ["pkcs8", "ecdh"] }
+sha2 = { version = "0.10.9", default-features = false }
+hmac = { version = "0.12", default-features = false }
+base64 = { version = "0.22.1", default-features = false }
+hkdf = { version = "0.12.4", default-features = false }
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
 
 # ── HTTP client (hyper-direct, no reqwest) ────────────────────────
 # Hand-rolled minimal client in src/http_client.rs avoids the entire
@@ -50,40 +49,40 @@ aes-gcm = "0.10.3"
 hyper = { version = "1", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "aws-lc-rs"] }
-http-body-util = "0.1"
-bytes = "1"
-rustls-pemfile = "2"
-webpki-roots = "1"
+http-body-util = { version = "0.1", default-features = false }
+bytes = { version = "1", default-features = false }
+rustls-pemfile = { version = "2", default-features = false, features = ["std"] }
+webpki-roots = { version = "1", default-features = false }
 
 # ── Observability ──────────────────────────────────────────────────
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { version = "0.1", default-features = false }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 
 # ── Utilities ──────────────────────────────────────────────────────
-uuid = { version = "1.16", features = ["v4"] }
+uuid = { version = "1.16", default-features = false, features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-csv = "1.4.0"
+csv = { version = "1.4.0", default-features = false }
 
 # ── Solana (granular) ──────────────────────────────────────────────
 # Replaces monolithic solana-sdk + solana-client + spl-token + spl-ata
 # with granular crates and inline instruction builders.
 # SPL crates replaced with ~40 lines in blockchain/spl_token.rs.
-solana-pubkey = { version = "4.1", features = ["sha2", "curve25519", "borsh"] }
-solana-keypair = "3.1"
-solana-signer = "3"
-solana-signature = "3.3"
-solana-hash = "4.2"
-solana-instruction = "3.2"
-solana-transaction = { version = "4", features = ["serde", "blake3"] }
-solana-message = { version = "4", features = ["serde"] }
-solana-system-interface = { version = "3.1", features = ["bincode"] }
-bincode = "1.3"
+solana-pubkey = { version = "4.1", default-features = false, features = ["sha2", "curve25519", "borsh"] }
+solana-keypair = { version = "3.1", default-features = false }
+solana-signer = { version = "3", default-features = false }
+solana-signature = { version = "3.3", default-features = false }
+solana-hash = { version = "4.2", default-features = false }
+solana-instruction = { version = "3.2", default-features = false }
+solana-transaction = { version = "4", default-features = false, features = ["serde", "blake3"] }
+solana-message = { version = "4", default-features = false, features = ["serde"] }
+solana-system-interface = { version = "3.1", default-features = false, features = ["bincode"] }
+bincode = { version = "1.3", default-features = false }
 # ── Borsh serialization (DRT smart contract) ─────────────────
-borsh = { version = "1", features = ["derive"] }
-hex = "0.4"
+borsh = { version = "1", default-features = false, features = ["derive"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
 # ── Embedded database ─────────────────────────────────────────────
-redb = "3.1"
+redb = { version = "3.1", default-features = false }
 
 # ── In-process cache ──────────────────────────────────────────────
-lru = "0.16"
-dashmap = "6"
+lru = { version = "0.16", default-features = false }
+dashmap = { version = "6", default-features = false }

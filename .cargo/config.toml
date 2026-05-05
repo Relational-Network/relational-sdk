@@ -19,7 +19,7 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 [build]
 jobs = 4
 incremental = true
-# rustc-wrapper = "sccache"
+rustc-wrapper = "sccache"
 dep-info-basedir = "."
 
 [profile.dev]
