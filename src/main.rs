@@ -43,6 +43,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{header, HeaderValue},
     routing::{get, post},
+    Json,
     Router,
 };
 use std::sync::Arc;
@@ -51,6 +52,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
+#[cfg(feature = "swagger-ui")]
 use utoipa_swagger_ui::SwaggerUi;
 
 use config::{
@@ -277,6 +279,10 @@ impl Modify for SecurityAddon {
     }
 }
 
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
+
 // ============================================================================
 // Application Entry Point
 // ============================================================================
@@ -443,12 +449,11 @@ async fn main() {
         .route("/v1/data/upload", post(data_upload))
         .route("/v1/data/upload-file", post(data_upload_file))
         .route("/v1/data/query", get(data_query))
+        .route("/api-doc/openapi.json", get(openapi_json))
         // Wallet service routes.
         .merge(api::wallet_router())
         // DRT pool routes.
         .merge(api::drt_router())
-        // OpenAPI documentation.
-        .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("x-content-type-options"),
@@ -463,6 +468,9 @@ async fn main() {
             HeaderValue::from_static("no-store"),
         ))
         .with_state(state);
+
+    #[cfg(feature = "swagger-ui")]
+    let app = app.merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()));
 
     // Bind on all interfaces for VM access.
     let addr = std::net::SocketAddr::from((SERVER_HOST, SERVER_PORT));
