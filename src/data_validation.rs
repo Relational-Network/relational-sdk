@@ -4,13 +4,38 @@
 //! Generic CSV schema registry and validator.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::storage::paths::StoragePaths;
+
 /// Maximum number of validation errors returned per request.
 pub const MAX_VALIDATION_ERRORS: usize = 100;
+
+/// How strictly a pool's CSV uploads are checked.
+///
+/// Set per pool at creation time (see `PoolMetadata::validation_mode`). The
+/// dashboard infers a schema from the first CSV; users pick a mode that fits
+/// their ingestion source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationMode {
+    /// Skip validation entirely. Use for trusted ingest paths (e.g. ERP via
+    /// Jitterbit) where the data shape is guaranteed upstream.
+    None,
+    /// Verify the CSV's header is exactly the schema's column set (no extras,
+    /// no missing). Skip per-cell type/length checks.
+    HeadersOnly,
+    /// Full type, length, date, and flag checking against the schema.
+    Strict,
+}
+
+impl Default for ValidationMode {
+    fn default() -> Self {
+        ValidationMode::HeadersOnly
+    }
+}
 
 /// Field type constraints supported by the CSV validator.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -51,31 +76,44 @@ pub struct ValidationSummary {
     pub rows_validated: usize,
 }
 
-/// Load a schema from disk at `{data_dir}/schemas/{schema_id}.json`.
+/// Load a pool's schema from `data/pools/{pda}/schema.json`.
 ///
-/// Returns `None` if the schema file does not exist or cannot be parsed.
-pub fn schema_for_id(schema_id: &str, data_dir: &Path) -> Option<Vec<FieldSchema>> {
-    let schema_path = data_dir.join("schemas").join(format!("{schema_id}.json"));
+/// Returns `None` if the file does not exist or cannot be parsed.
+pub fn load_pool_schema(paths: &StoragePaths, pool_pda: &str) -> Option<Vec<FieldSchema>> {
+    let schema_path = paths.pool_schema(pool_pda);
     let content = std::fs::read_to_string(&schema_path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
-/// Persist a schema definition to `{data_dir}/schemas/{schema_id}.json`.
+/// Persist a pool's schema to `data/pools/{pda}/schema.json`.
 ///
-/// Creates the `schemas/` directory if it does not exist.
-pub fn save_schema(schema_id: &str, schema: &[FieldSchema], data_dir: &Path) -> Result<(), String> {
-    let schemas_dir = data_dir.join("schemas");
-    std::fs::create_dir_all(&schemas_dir)
-        .map_err(|e| format!("failed to create schemas directory: {e}"))?;
-    let schema_path = schemas_dir.join(format!("{schema_id}.json"));
+/// Creates the pool directory if it does not exist.
+pub fn save_pool_schema(
+    paths: &StoragePaths,
+    pool_pda: &str,
+    schema: &[FieldSchema],
+) -> Result<(), String> {
+    let pool_dir = paths.pool_dir(pool_pda);
+    std::fs::create_dir_all(&pool_dir)
+        .map_err(|e| format!("failed to create pool directory: {e}"))?;
+    let schema_path = paths.pool_schema(pool_pda);
     let json = serde_json::to_string_pretty(schema)
         .map_err(|e| format!("failed to serialize schema: {e}"))?;
     std::fs::write(&schema_path, json).map_err(|e| format!("failed to write schema file: {e}"))?;
     Ok(())
 }
 
-/// Validate CSV bytes against a given schema.
-pub fn validate_csv_bytes(data: &[u8], schema: &[FieldSchema]) -> ValidationSummary {
+/// Validate CSV bytes against a given schema under the chosen mode.
+///
+/// - [`ValidationMode::None`] — return success without parsing cells (still counts rows).
+/// - [`ValidationMode::HeadersOnly`] — header column set must equal the schema's column set
+///   (no extras, no missing). No type/length/date/flag checks.
+/// - [`ValidationMode::Strict`] — full per-cell checking.
+pub fn validate_csv_bytes(
+    data: &[u8],
+    schema: &[FieldSchema],
+    mode: ValidationMode,
+) -> ValidationSummary {
     let mut errors = Vec::new();
     let mut rows_validated = 0usize;
 
@@ -99,11 +137,24 @@ pub fn validate_csv_bytes(data: &[u8], schema: &[FieldSchema]) -> ValidationSumm
         }
     };
 
+    if matches!(mode, ValidationMode::None) {
+        // Just count rows; trust the upstream producer.
+        for _ in reader.records().flatten() {
+            rows_validated += 1;
+        }
+        return ValidationSummary {
+            valid: true,
+            errors,
+            rows_validated,
+        };
+    }
+
     let mut header_to_index = HashMap::new();
     for (idx, header) in headers.iter().enumerate() {
         header_to_index.insert(header, idx);
     }
 
+    // Schema columns must all be present.
     for field in schema {
         if !header_to_index.contains_key(field.name.as_str()) {
             errors.push(ValidationError {
@@ -121,6 +172,34 @@ pub fn validate_csv_bytes(data: &[u8], schema: &[FieldSchema]) -> ValidationSumm
         }
     }
 
+    // HeadersOnly + Strict both forbid extra columns: pool storage appends by
+    // header order, so an unexpected column would corrupt the dataset shape.
+    let schema_names: std::collections::HashSet<&str> =
+        schema.iter().map(|f| f.name.as_str()).collect();
+    for header in headers.iter() {
+        if !schema_names.contains(header) && errors.len() < MAX_VALIDATION_ERRORS {
+            errors.push(ValidationError {
+                row: 0,
+                field: header.to_string(),
+                message: format!("Unexpected column not in schema: {header}"),
+            });
+        }
+    }
+
+    if matches!(mode, ValidationMode::HeadersOnly) {
+        // Skip per-cell checks; just count the rows we could parse.
+        for record in reader.records().flatten() {
+            let _ = record;
+            rows_validated += 1;
+        }
+        return ValidationSummary {
+            valid: errors.is_empty(),
+            errors,
+            rows_validated,
+        };
+    }
+
+    // Strict mode — full per-cell validation.
     for (row_idx, row_result) in reader.records().enumerate() {
         if errors.len() >= MAX_VALIDATION_ERRORS {
             break;
@@ -199,14 +278,8 @@ fn validate_field_value(value: &str, field: &FieldSchema) -> Option<String> {
             Err(_) => Some(format!("Must be an integer, got '{value}'")),
         },
         FieldType::Decimal { precision, scale } => validate_decimal(value, precision, scale),
-        FieldType::DateDdMmYyyy => validate_date_dd_mm_yyyy(value),
-        FieldType::Flag01 => {
-            if matches!(value, "0" | "1") {
-                None
-            } else {
-                Some(format!("Must be '0' or '1', got '{value}'"))
-            }
-        }
+        FieldType::DateDdMmYyyy => validate_date_lenient(value),
+        FieldType::Flag01 => validate_flag(value),
     }
 }
 
@@ -246,23 +319,36 @@ fn validate_decimal(value: &str, precision: u8, scale: u8) -> Option<String> {
     None
 }
 
-fn validate_date_dd_mm_yyyy(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    if bytes.len() != 10 || bytes[2] != b'/' || bytes[5] != b'/' {
-        return Some(format!("Date must be in DD/MM/YYYY format, got '{value}'"));
-    }
-    if !bytes[0..2].iter().all(u8::is_ascii_digit)
-        || !bytes[3..5].iter().all(u8::is_ascii_digit)
-        || !bytes[6..10].iter().all(u8::is_ascii_digit)
+/// Accept either `DD/MM/YYYY` or `YYYY-MM-DD`, optionally followed by a time
+/// component (` HH:MM[:SS][.fff][Z]` or `THH:MM...`). Calendar validity is
+/// always enforced via chrono.
+fn validate_date_lenient(value: &str) -> Option<String> {
+    // Drop any time suffix so "01/02/2025 14:30" or "2025-02-01T14:30:00Z" both work.
+    let date_part = value
+        .split_once(|c: char| c == ' ' || c == 'T')
+        .map(|(d, _)| d)
+        .unwrap_or(value);
+
+    // Try DD/MM/YYYY then YYYY-MM-DD.
+    if chrono::NaiveDate::parse_from_str(date_part, "%d/%m/%Y").is_ok()
+        || chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d").is_ok()
     {
-        return Some(format!("Date must be in DD/MM/YYYY format, got '{value}'"));
+        return None;
     }
 
-    // Use chrono for proper calendar validation (leap years, month-specific day limits).
-    let reformatted = format!("{}-{}-{}", &value[6..10], &value[3..5], &value[0..2]);
-    match chrono::NaiveDate::parse_from_str(&reformatted, "%Y-%m-%d") {
-        Ok(_) => None,
-        Err(_) => Some(format!("Invalid calendar date, got '{value}'")),
+    Some(format!(
+        "Date must be DD/MM/YYYY or YYYY-MM-DD (with optional time), got '{value}'"
+    ))
+}
+
+/// Accept the canonical `0`/`1` plus common boolean spellings, case-insensitive.
+fn validate_flag(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "0" | "1" | "true" | "false" | "yes" | "no" | "y" | "n" => None,
+        _ => Some(format!(
+            "Must be a boolean (0/1, true/false, yes/no), got '{value}'"
+        )),
     }
 }
 
@@ -375,7 +461,7 @@ mod tests {
     #[test]
     fn validates_happy_path() {
         let schema = test_pilot_schema();
-        let result = validate_csv_bytes(valid_csv().as_bytes(), &schema);
+        let result = validate_csv_bytes(valid_csv().as_bytes(), &schema, ValidationMode::Strict);
         assert!(result.valid, "expected valid CSV, got: {:?}", result.errors);
         assert_eq!(result.rows_validated, 1);
     }
@@ -384,7 +470,7 @@ mod tests {
     fn rejects_missing_required_column() {
         let csv = "externalTypeId,awardResult\n1,PASS\n";
         let schema = test_pilot_schema();
-        let result = validate_csv_bytes(csv.as_bytes(), &schema);
+        let result = validate_csv_bytes(csv.as_bytes(), &schema, ValidationMode::Strict);
         assert!(!result.valid);
         assert!(result
             .errors
@@ -400,7 +486,7 @@ mod tests {
         ]
         .join("\n");
         let schema = test_pilot_schema();
-        let result = validate_csv_bytes(csv.as_bytes(), &schema);
+        let result = validate_csv_bytes(csv.as_bytes(), &schema, ValidationMode::Strict);
         assert!(!result.valid);
         assert!(result
             .errors
@@ -420,7 +506,7 @@ mod tests {
         ]
         .join("\n");
         let schema = test_pilot_schema();
-        let result = validate_csv_bytes(csv.as_bytes(), &schema);
+        let result = validate_csv_bytes(csv.as_bytes(), &schema, ValidationMode::Strict);
         assert!(!result.valid);
         assert!(result
             .errors
@@ -436,12 +522,71 @@ mod tests {
         ]
         .join("\n");
         let schema = test_pilot_schema();
-        let result = validate_csv_bytes(csv.as_bytes(), &schema);
+        let result = validate_csv_bytes(csv.as_bytes(), &schema, ValidationMode::Strict);
         assert!(!result.valid);
         assert!(result
             .errors
             .iter()
-            .any(|e| e.field == "awardBoardDate" && e.message.contains("Invalid calendar date")));
+            .any(|e| e.field == "awardBoardDate" && e.message.contains("Date must be")));
+    }
+
+    #[test]
+    fn strict_accepts_iso_date_and_boolean_flag() {
+        let csv = [
+            "description,externalTypeId,privacy,issuingBody,memberBody,awardBoardDate,awardGpaValue,awardResult,awardName,awardMajorCode,awardProgrammeCode,awardYear,awardType,updated_at,created_at,is_deleted,azureId",
+            "A,1,true,ISS,MB1,2025-02-01,9.50,PASS,Name,MAJOR,PROG,2024,2,2025-02-01 14:30,01/02/2025,no,id",
+        ]
+        .join("\n");
+        let schema = test_pilot_schema();
+        let result = validate_csv_bytes(csv.as_bytes(), &schema, ValidationMode::Strict);
+        assert!(result.valid, "expected valid CSV, got: {:?}", result.errors);
+    }
+
+    #[test]
+    fn headers_only_skips_type_checks() {
+        let csv = [
+            "description,externalTypeId,privacy,issuingBody,memberBody,awardBoardDate,awardGpaValue,awardResult,awardName,awardMajorCode,awardProgrammeCode,awardYear,awardType,updated_at,created_at,is_deleted,azureId",
+            "A,not-a-number,maybe,ISS,MB1,blah,xx.yy,PASS,Name,MAJOR,PROG,2024,2,nope,nope,maybe,id",
+        ]
+        .join("\n");
+        let schema = test_pilot_schema();
+        let result = validate_csv_bytes(csv.as_bytes(), &schema, ValidationMode::HeadersOnly);
+        assert!(
+            result.valid,
+            "HeadersOnly should ignore cell values: {:?}",
+            result.errors
+        );
+        assert_eq!(result.rows_validated, 1);
+    }
+
+    #[test]
+    fn headers_only_rejects_extra_columns() {
+        // Schema column set is the pilot schema; CSV adds an unexpected column.
+        let csv = [
+            "description,externalTypeId,privacy,issuingBody,memberBody,awardBoardDate,awardGpaValue,awardResult,awardName,awardMajorCode,awardProgrammeCode,awardYear,awardType,updated_at,created_at,is_deleted,azureId,extraCol",
+            "A,1,1,ISS,MB1,01/02/2025,9.50,PASS,Name,MAJOR,PROG,2024,2,01/02/2025,01/02/2025,0,id,oops",
+        ]
+        .join("\n");
+        let schema = test_pilot_schema();
+        let result = validate_csv_bytes(csv.as_bytes(), &schema, ValidationMode::HeadersOnly);
+        assert!(!result.valid);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.field == "extraCol" && e.message.contains("Unexpected column")));
+    }
+
+    #[test]
+    fn none_mode_accepts_anything_with_headers() {
+        let csv = "a,b,c\ngarbage,more,trash\n";
+        let schema = vec![FieldSchema {
+            name: "totally_different".into(),
+            field_type: FieldType::Integer,
+            nullable: false,
+        }];
+        let result = validate_csv_bytes(csv.as_bytes(), &schema, ValidationMode::None);
+        assert!(result.valid);
+        assert_eq!(result.rows_validated, 1);
     }
 
     #[test]
@@ -454,14 +599,25 @@ mod tests {
     }
 
     #[test]
-    fn save_and_load_schema_from_disk() {
+    fn save_and_load_pool_schema_isolated_per_pda() {
         let dir = std::env::temp_dir().join(format!("schema_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
-        let schema = test_pilot_schema();
-        save_schema("test_v1", &schema, &dir).expect("save");
-        let loaded = schema_for_id("test_v1", &dir).expect("load");
-        assert_eq!(loaded.len(), schema.len());
-        // Cleanup
+        let paths = StoragePaths::new(&dir);
+
+        let schema_a = test_pilot_schema();
+        let mut schema_b = test_pilot_schema();
+        // Distinguish B's schema so we can prove A is untouched.
+        schema_b.pop();
+
+        save_pool_schema(&paths, "PDA_A", &schema_a).expect("save A");
+        save_pool_schema(&paths, "PDA_B", &schema_b).expect("save B");
+
+        let loaded_a = load_pool_schema(&paths, "PDA_A").expect("load A");
+        let loaded_b = load_pool_schema(&paths, "PDA_B").expect("load B");
+        assert_eq!(loaded_a.len(), schema_a.len());
+        assert_eq!(loaded_b.len(), schema_b.len());
+        assert_ne!(loaded_a.len(), loaded_b.len(), "pools must be isolated");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

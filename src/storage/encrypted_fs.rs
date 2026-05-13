@@ -100,7 +100,6 @@ impl EncryptedStorage {
             self.paths.wallets_dir(),
             self.paths.audit_dir(),
             self.paths.pools_dir(),
-            self.paths.schemas_dir(),
         ];
         for dir in &dirs {
             fs::create_dir_all(dir)?;

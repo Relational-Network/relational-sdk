@@ -10,6 +10,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::data_validation::ValidationMode;
+
 /// Pool lifecycle state.
 ///
 /// Pools transition through these states:
@@ -40,6 +42,11 @@ pub struct PoolMetadata {
     pub owner_pubkey: Option<String>,
     /// Schema used for CSV validation (e.g., `"pilot_v1"`).
     pub schema_id: String,
+    /// How strictly CSV uploads are validated against the pool's schema.
+    /// Defaults to `HeadersOnly` for forward-compat with pools written before
+    /// this field existed.
+    #[serde(default)]
+    pub validation_mode: ValidationMode,
     /// Current lifecycle state.
     pub state: PoolState,
     /// When the pool was created on-chain.

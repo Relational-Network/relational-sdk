@@ -202,6 +202,7 @@ pub async fn create_pool(
                 owner_wallet_id: payload.wallet_id.clone(),
                 owner_pubkey: Some(owner.to_string()),
                 schema_id: payload.schema_id.clone(),
+                validation_mode: payload.validation_mode,
                 state: PoolState::NeedsInit,
                 created_onchain_at: chrono::Utc::now(),
                 initialized_at: None,
@@ -252,6 +253,7 @@ pub async fn create_pool(
             "pool_name": payload.pool_name,
             "tx_signature": sig_str,
             "schema_id": payload.schema_id,
+            "validation_mode": payload.validation_mode,
             "drt_count": drt_configs.len(),
             "state_transition": "created -> needs_init"
         }));

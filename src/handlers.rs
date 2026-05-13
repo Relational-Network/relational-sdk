@@ -11,8 +11,6 @@
 
 use axum::{
     extract::{Multipart, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -24,10 +22,11 @@ use crate::auth::{AdminToken, ReadOnlyToken, UserToken};
 use crate::config::MAX_BODY_SIZE;
 use crate::crypto::{enclave_key, Jwk};
 use crate::data_validation::{
-    schema_for_id, validate_csv_bytes, ValidationError, ValidationSummary,
+    load_pool_schema, validate_csv_bytes, ValidationMode, ValidationSummary,
 };
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::storage::paths::StoragePaths;
 
 // ============================================================================
 // Public Key Endpoint
@@ -101,33 +100,6 @@ pub async fn admin_status(AdminToken(token): AdminToken) -> Json<AdminStatusResp
 // Data Endpoints
 // ============================================================================
 
-/// Response for CSV validation endpoint.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DataValidateResponse {
-    pub valid: bool,
-    pub schema_id: String,
-    pub rows_validated: usize,
-    pub errors: Vec<ValidationError>,
-}
-
-/// Response for validated CSV uploads.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DataFileUploadResponse {
-    pub status: String,
-    pub record_id: String,
-    pub schema_id: String,
-    pub rows_validated: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct StoredUploadMetadata {
-    schema_id: String,
-    uploaded_by: String,
-    rows_validated: usize,
-    uploaded_at: chrono::DateTime<chrono::Utc>,
-    source: String,
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct MultipartCsvInput {
     pub schema_id: Option<String>,
@@ -142,121 +114,6 @@ pub(crate) struct MultipartCsvInput {
 pub(crate) struct ParsedCsvPayload {
     pub schema_id: String,
     pub csv_bytes: Vec<u8>,
-    pub source: String,
-}
-
-/// Validate CSV without persisting it.
-#[utoipa::path(
-    post,
-    path = "/v1/data/validate",
-    tag = "Data",
-    summary = "Validate CSV upload",
-    description = "Validates a CSV file against a schema_id. Accepts multipart file upload and optional encrypted multipart fields.",
-    security(("bearer_auth" = [])),
-    responses(
-        (status = 200, description = "Validation result", body = DataValidateResponse),
-        (status = 400, description = "Invalid request"),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Forbidden - user role required")
-    )
-)]
-pub async fn data_validate(
-    UserToken(_token): UserToken,
-    State(state): State<AppState>,
-    multipart: Multipart,
-) -> Result<Json<DataValidateResponse>, ApiError> {
-    let payload = parse_csv_payload(multipart).await?;
-    let data_dir = state.storage.paths().root();
-    let validation = validate_payload(&payload.schema_id, &payload.csv_bytes, data_dir)?;
-
-    Ok(Json(DataValidateResponse {
-        valid: validation.valid,
-        schema_id: payload.schema_id,
-        rows_validated: validation.rows_validated,
-        errors: validation.errors,
-    }))
-}
-
-/// Validate and persist CSV data.
-#[utoipa::path(
-    post,
-    path = "/v1/data/upload-file",
-    tag = "Data",
-    summary = "Upload CSV data",
-    description = "Validates and persists CSV data. Returns 422 with validation errors when payload is invalid.",
-    security(("bearer_auth" = [])),
-    responses(
-        (status = 200, description = "CSV stored", body = DataFileUploadResponse),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Forbidden - user role required"),
-        (status = 422, description = "Validation failed", body = DataValidateResponse)
-    )
-)]
-pub async fn data_upload_file(
-    UserToken(token): UserToken,
-    State(state): State<AppState>,
-    multipart: Multipart,
-) -> Result<Response, ApiError> {
-    let payload = parse_csv_payload(multipart).await?;
-    let data_dir = state.storage.paths().root();
-    let validation = validate_payload(&payload.schema_id, &payload.csv_bytes, data_dir)?;
-
-    if !validation.valid {
-        let response = DataValidateResponse {
-            valid: false,
-            schema_id: payload.schema_id,
-            rows_validated: validation.rows_validated,
-            errors: validation.errors,
-        };
-        return Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(response)).into_response());
-    }
-
-    let record_id = Uuid::new_v4().to_string();
-    // Sanitise schema_id to prevent path traversal (e.g. "../../etc/passwd").
-    if !is_safe_identifier(&payload.schema_id) {
-        return Err(ApiError::bad_request(
-            "schema_id must contain only alphanumeric characters, hyphens, and underscores",
-        ));
-    }
-    let upload_dir = state
-        .storage
-        .paths()
-        .root()
-        .join("uploads")
-        .join(&payload.schema_id);
-    state.storage.create_dir(&upload_dir)?;
-
-    let csv_path = upload_dir.join(format!("{record_id}.csv"));
-    state.storage.write_raw(&csv_path, &payload.csv_bytes)?;
-
-    let metadata = StoredUploadMetadata {
-        schema_id: payload.schema_id.clone(),
-        uploaded_by: token.sub.clone(),
-        rows_validated: validation.rows_validated,
-        uploaded_at: chrono::Utc::now(),
-        source: payload.source.clone(),
-    };
-    let meta_path = upload_dir.join(format!("{record_id}.meta.json"));
-    state.storage.write_json(&meta_path, &metadata)?;
-
-    info!(
-        sub = %token.sub,
-        role = %token.role,
-        record_id = %record_id,
-        schema_id = %payload.schema_id,
-        rows_validated = validation.rows_validated,
-        source = %payload.source,
-        csv_size = payload.csv_bytes.len(),
-        "Validated CSV upload stored"
-    );
-
-    Ok(Json(DataFileUploadResponse {
-        status: "stored".to_string(),
-        record_id,
-        schema_id: payload.schema_id,
-        rows_validated: validation.rows_validated,
-    })
-    .into_response())
 }
 
 /// Request body for data upload.
@@ -409,18 +266,27 @@ pub async fn data_query(ReadOnlyToken(token): ReadOnlyToken) -> Json<DataQueryRe
     })
 }
 
+/// Validate a CSV payload against the pool's stored schema.
+///
+/// `mode == None` skips the schema lookup entirely. Other modes require the
+/// schema to have been uploaded via `POST /v1/drt/pools/{pda}/schema`.
 pub(crate) fn validate_payload(
-    schema_id: &str,
+    paths: &StoragePaths,
+    pool_pda: &str,
     csv_bytes: &[u8],
-    data_dir: &std::path::Path,
+    mode: ValidationMode,
 ) -> Result<ValidationSummary, ApiError> {
-    let schema = schema_for_id(schema_id, data_dir).ok_or_else(|| {
+    if matches!(mode, ValidationMode::None) {
+        return Ok(validate_csv_bytes(csv_bytes, &[], mode));
+    }
+
+    let schema = load_pool_schema(paths, pool_pda).ok_or_else(|| {
         ApiError::bad_request(format!(
-            "schema '{schema_id}' not found — upload it to the enclave first"
+            "schema for pool {pool_pda} not found — upload one to the enclave first",
         ))
     })?;
 
-    Ok(validate_csv_bytes(csv_bytes, &schema))
+    Ok(validate_csv_bytes(csv_bytes, &schema, mode))
 }
 
 pub(crate) async fn parse_csv_payload(multipart: Multipart) -> Result<ParsedCsvPayload, ApiError> {
@@ -455,7 +321,6 @@ pub(crate) async fn parse_csv_payload(multipart: Multipart) -> Result<ParsedCsvP
     Ok(ParsedCsvPayload {
         schema_id,
         csv_bytes,
-        source: "multipart_encrypted".to_string(),
     })
 }
 
@@ -539,14 +404,4 @@ pub(crate) fn ensure_size_limit(bytes: &[u8]) -> Result<(), ApiError> {
         )));
     }
     Ok(())
-}
-
-/// Validate an identifier contains only safe characters (alphanumeric, `-`, `_`).
-/// Prevents path-traversal when the value is used in filesystem paths.
-fn is_safe_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }

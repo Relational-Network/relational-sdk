@@ -27,7 +27,7 @@ use tracing::{info, warn};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::auth::AdminToken;
+use crate::auth::{AdminToken, UserToken};
 use crate::blockchain::drt::{
     accounts::{fetch_pool, find_drt_in_pool},
     instructions::build_redeem_drt,
@@ -139,6 +139,7 @@ pub struct PoolSummaryResponse {
     pub pool_name: String,
     pub owner: String,
     pub schema_id: String,
+    pub validation_mode: crate::data_validation::ValidationMode,
     pub state: String,
     pub total_credentials: u64,
     pub revoked_count: u64,
@@ -424,12 +425,10 @@ pub async fn upload_schema(
         )));
     }
 
-    // Save schema to disk.
-    let data_dir = state.storage.paths().root();
+    // Save schema under the pool's directory so two pools can share a schema_id
+    // without overwriting each other.
     let field_count = payload.fields.len();
-    // TODO, save schema with UUID to prevent overwrite if multiple pools
-    // use the same schema_id. For now we assume schema_id is unique across all pools.
-    crate::data_validation::save_schema(&payload.schema_id, &payload.fields, data_dir)
+    crate::data_validation::save_pool_schema(state.storage.paths(), &pool_pda_str, &payload.fields)
         .map_err(ApiError::internal)?;
 
     info!(
@@ -457,6 +456,51 @@ pub async fn upload_schema(
     Ok(Json(UploadSchemaResponse {
         schema_id: payload.schema_id,
         field_count,
+    }))
+}
+
+/// Response for `GET /v1/drt/pools/{pool_pda}/schema`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GetSchemaResponse {
+    pub pool_pda: String,
+    pub schema_id: String,
+    pub fields: Vec<crate::data_validation::FieldSchema>,
+}
+
+/// Get a pool's stored schema.
+#[utoipa::path(
+    get,
+    path = "/v1/drt/pools/{pool_pda}/schema",
+    tag = "Credentials",
+    summary = "Get pool schema",
+    description = "Returns the schema previously uploaded for the pool. 404 if no schema has been uploaded yet.",
+    security(("bearer_auth" = [])),
+    params(
+        ("pool_pda" = String, Path, description = "Pool PDA address (base58)"),
+    ),
+    responses(
+        (status = 200, description = "Schema returned", body = GetSchemaResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Schema not uploaded"),
+    )
+)]
+pub async fn get_schema(
+    UserToken(_token): UserToken,
+    State(state): State<AppState>,
+    Path(pool_pda_str): Path<String>,
+) -> Result<Json<GetSchemaResponse>, ApiError> {
+    let meta = load_pool_meta(&state, &pool_pda_str)?;
+    let fields = crate::data_validation::load_pool_schema(state.storage.paths(), &pool_pda_str)
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "no schema uploaded yet for pool {pool_pda_str} — POST one to /v1/drt/pools/{{pda}}/schema"
+            ))
+        })?;
+
+    Ok(Json(GetSchemaResponse {
+        pool_pda: pool_pda_str,
+        schema_id: meta.schema_id,
+        fields,
     }))
 }
 
@@ -521,6 +565,7 @@ pub async fn initialize_pool(
                 owner_wallet_id: wallet.wallet_id.clone(),
                 owner_pubkey: Some(wallet.public_address.clone()),
                 schema_id: parsed.schema_id.clone(),
+                validation_mode: Default::default(),
                 state: PoolState::NeedsInit,
                 created_onchain_at: Utc::now(),
                 initialized_at: None,
@@ -540,8 +585,12 @@ pub async fn initialize_pool(
     }
 
     // Validate CSV against the pool's schema.
-    let data_dir = state.storage.paths().root();
-    let summary = validate_payload(&meta.schema_id, &parsed.csv_bytes, data_dir)?;
+    let summary = validate_payload(
+        state.storage.paths(),
+        &pool_pda_str,
+        &parsed.csv_bytes,
+        meta.validation_mode,
+    )?;
     if !summary.valid {
         return Err(ApiError::bad_request(format!(
             "CSV validation failed: {} error(s)",
@@ -705,8 +754,12 @@ pub async fn issue_credentials(
     }
 
     // Validate CSV against pool's schema.
-    let data_dir = state.storage.paths().root();
-    let summary = validate_payload(&meta.schema_id, &parsed.csv_bytes, data_dir)?;
+    let summary = validate_payload(
+        state.storage.paths(),
+        &pool_pda_str,
+        &parsed.csv_bytes,
+        meta.validation_mode,
+    )?;
     if !summary.valid {
         return Err(ApiError::bad_request(format!(
             "CSV validation failed: {} error(s)",
@@ -1141,6 +1194,7 @@ pub async fn pool_summary(
         pool_name: meta.pool_name,
         owner: pool.owner.to_string(),
         schema_id: meta.schema_id,
+        validation_mode: meta.validation_mode,
         state: state_str.to_string(),
         total_credentials: meta.total_credentials,
         revoked_count: meta.revoked_count,

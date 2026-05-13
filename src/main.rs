@@ -43,8 +43,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{header, HeaderValue},
     routing::{get, post},
-    Json,
-    Router,
+    Json, Router,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -64,9 +63,8 @@ use config::{
 // The enclave only listens on localhost; browsers never connect directly.
 use crypto::enclave_key;
 use handlers::{
-    admin_status, data_query, data_upload, data_upload_file, data_validate, get_public_key,
-    AdminStatusResponse, DataFileUploadResponse, DataQueryResponse, DataUploadRequest,
-    DataUploadResponse, DataValidateResponse,
+    admin_status, data_query, data_upload, get_public_key, AdminStatusResponse, DataQueryResponse,
+    DataUploadRequest, DataUploadResponse,
 };
 use health::{health, liveness, readiness, HealthChecks, HealthResponse, ReadyResponse};
 use state::AppState;
@@ -126,9 +124,7 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         health::readiness,
         handlers::get_public_key,
         handlers::admin_status,
-        handlers::data_validate,
         handlers::data_upload,
-        handlers::data_upload_file,
         handlers::data_query,
         // Wallet API
         api::users::get_me,
@@ -157,6 +153,7 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         api::pools::get_tx_events,
         // Credential / Pool discovery API
         api::credentials::upload_schema,
+        api::credentials::get_schema,
         api::credentials::initialize_pool,
         api::credentials::issue_credentials,
         api::credentials::revoke_credentials,
@@ -174,10 +171,9 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         AdminStatusResponse,
         DataUploadRequest,
         DataUploadResponse,
-        DataValidateResponse,
-        DataFileUploadResponse,
         DataQueryResponse,
         data_validation::ValidationError,
+        data_validation::ValidationMode,
         crypto::Jwk,
         // Wallet schemas
         api::users::UserMeResponse,
@@ -226,6 +222,9 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         // Credential schemas
         api::credentials::UploadSchemaRequest,
         api::credentials::UploadSchemaResponse,
+        api::credentials::GetSchemaResponse,
+        data_validation::FieldSchema,
+        data_validation::FieldType,
         api::credentials::InitializePoolResponse,
         api::credentials::IssueCredentialsResponse,
         api::credentials::RevokeCredentialsRequest,
@@ -445,9 +444,7 @@ async fn main() {
         // v1 API endpoints.
         .route("/v1/attestation/public-key", get(get_public_key))
         .route("/v1/admin/status", get(admin_status))
-        .route("/v1/data/validate", post(data_validate))
         .route("/v1/data/upload", post(data_upload))
-        .route("/v1/data/upload-file", post(data_upload_file))
         .route("/v1/data/query", get(data_query))
         .route("/api-doc/openapi.json", get(openapi_json))
         // Wallet service routes.

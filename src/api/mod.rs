@@ -168,7 +168,7 @@ pub fn drt_router() -> Router<AppState> {
         .route("/v1/drt/events/{signature}", get(pools::get_tx_events)) // ── Schema upload ────────────────────────────────────────
         .route(
             "/v1/drt/pools/{pool_pda}/schema",
-            post(credentials::upload_schema),
+            post(credentials::upload_schema).get(credentials::get_schema),
         )
         // ── Credential issuance ─────────────────────────────────
         .route(

@@ -58,13 +58,6 @@ impl StoragePaths {
         self.audit_dir().join(format!("{date}.jsonl"))
     }
 
-    // ── Schemas ───────────────────────────────────────────────────
-
-    /// `/data/schemas/`
-    pub fn schemas_dir(&self) -> PathBuf {
-        self.root.join("schemas")
-    }
-
     // ── Pools ─────────────────────────────────────────────────────
 
     /// `/data/pools/`
@@ -90,6 +83,11 @@ impl StoragePaths {
     /// `/data/pools/{pool_pda}/revocations.jsonl`
     pub fn pool_revocations(&self, pda: &str) -> PathBuf {
         self.pool_dir(pda).join("revocations.jsonl")
+    }
+
+    /// `/data/pools/{pool_pda}/schema.json`
+    pub fn pool_schema(&self, pda: &str) -> PathBuf {
+        self.pool_dir(pda).join("schema.json")
     }
 
     // ── Transaction DB ───────────────────────────────────────────

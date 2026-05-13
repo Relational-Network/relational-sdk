@@ -159,6 +159,9 @@ pub struct CreatePoolRequest {
     /// Schema for CSV validation (default: `"pilot_v1"`).
     #[serde(default = "default_schema_id")]
     pub schema_id: String,
+    /// How strictly to validate uploaded CSVs (default: `HeadersOnly`).
+    #[serde(default)]
+    pub validation_mode: crate::data_validation::ValidationMode,
 }
 
 fn default_schema_id() -> String {

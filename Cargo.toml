@@ -35,7 +35,7 @@ rustls = { version = "0.23.36", default-features = false, features = ["aws-lc-rs
 # CRITICAL: Only enable p256 for ES256 (ECDSA P-256) - NEVER use rust_crypto or rsa features!
 # The rsa crate has unfixed vulnerability RUSTSEC-2023-0071 (Marvin Attack)
 # aws_lc_rs provides CryptoProvider without the vulnerable rsa crate (uses AWS-LC/BoringSSL)
-jsonwebtoken = { version = "10.3.0", default-features = false, features = [ "p256"] }
+jsonwebtoken = { version = "10.3.0", default-features = false, features = [ "p256", "aws_lc_rs"] }
 p256 = { version = "0.13.2", default-features = false , features = ["ecdh"]}
 sha2 = { version = "0.10.9", default-features = false }
 hmac = { version = "0.12", default-features = false }
