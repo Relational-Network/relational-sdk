@@ -49,7 +49,7 @@ The image is pre-signed at build time — no signing key is needed at runtime.
 # Build (signs enclave at build time via BuildKit secret)
 make docker-build
 # or with a custom key:
-make docker-build SIGNING_KEY=/path/to/enclave-key.pem
+make docker-build SGX_SIGNING_KEY=/path/to/enclave-key.pem
 
 # Run (requires SGX hardware)
 make docker-run
@@ -114,25 +114,25 @@ curl -sk https://127.0.0.1:8080/v1/attestation/public-key | jq
 
 ## Enclave Measurements & Reproducibility
 
-The MRENCLAVE hash uniquely identifies the enclave binary and trusted files. `measurements.txt`
-is the committed source of truth.
-
-**Current measurements:** [`measurements.txt`](measurements.txt)
+The MRENCLAVE hash uniquely identifies the enclave binary and trusted files. [`measurements.toml`](measurements.toml)
+is the committed source of truth and pins the full build contract (base image SHA, Ubuntu snapshot,
+Gramine and Rust versions, SIGSTRUCT date, and the expected `[enclave]` block).
 
 ```bash
-# Build locally (no cache) and compare against measurements.txt
-make verify-mrenclave
+# Print [enclave] block from a locally built image (in measurements.toml layout)
+make docker-sigstruct
 
-# Also compare against a specific GHCR image
-make verify-mrenclave DOCKER_IMAGE=ghcr.io/relational-network/relational-sdk:sha-<commit>
+# Rebuild --no-cache and verify mr_enclave matches measurements.toml
+make verify-mrenclave
 ```
 
-**When MRENCLAVE changes** (code, Gramine/SGX packages, Rust toolchain, or `SGX_DEBUG` changes):
-1. Run `make verify-mrenclave` — prints both old and new hashes
-2. Update `measurements.txt` with the new hash
-3. Commit code change + `measurements.txt` together in the same PR
+**When MRENCLAVE changes** (code, Gramine/SGX packages, Rust toolchain, or trusted files change):
+1. Run `make docker-build && make docker-sigstruct` — prints the new `[enclave]` block
+2. Paste the new block into `measurements.toml`
+3. Commit code change + `measurements.toml` together in the same PR
 
-CI fails if the built `mr_enclave` differs from `measurements.txt`, preventing silent changes.
+CI fails if the built `mr_enclave` differs from `measurements.toml`, preventing silent changes.
+The signing key is consumed at build time only and is never present in any image layer or on the staging VM.
 
 | Factor | MRENCLAVE | MRSIGNER |
 |--------|:---------:|:--------:|
@@ -148,7 +148,7 @@ CI fails if the built `mr_enclave` differs from `measurements.txt`, preventing s
 
 ### CI/CD Overview
 
-- **CI** (`ci.yml`): Lint, test, build + sign Docker image, push to GHCR, verify MRENCLAVE matches `measurements.txt`
+- **CI** (`ci.yml`): Lint, test, build + sign Docker image, push to GHCR, verify MRENCLAVE matches `measurements.toml`, fail on `debug_enclave != False`, print deploy-by-digest reference to the run summary
 - **CD** (`cd-staging.yml`): Pull pre-built image from GHCR, deploy to staging VM
 
 The staging VM does **not** build or sign — it only runs the pre-built image from GHCR.

@@ -43,9 +43,9 @@ use axum::{
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use std::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
-use crate::config::{avs_jwks_url, AVS_ISSUER, JWKS_CACHE_TTL_SECS};
+use crate::config::{avs_jwks_url, is_loopback_http_jwks, AVS_ISSUER, JWKS_CACHE_TTL_SECS};
 use crate::crypto::{enclave_key, Jwk, JwksResponse};
 use crate::http_client::HttpClient;
 use crate::state::AppState;
@@ -185,8 +185,10 @@ pub async fn get_decoding_keys(state: &AppState) -> Result<Vec<(String, Decoding
 
     // Fetch and update cache.
     let url = avs_jwks_url();
-    // Warn if using HTTP (insecure in production)
-    if url.starts_with("http://") && !url.contains("localhost") && !url.contains("127.0.0.1") {
+    // Warn if using HTTP for a non-loopback host (insecure in production).
+    // Uses parsed-host check; substring matching would let `evil.com/localhost`
+    // through.
+    if url.starts_with("http://") && !is_loopback_http_jwks(&url) {
         tracing::warn!(
             "JWKS URL uses HTTP - this is insecure in production: {}",
             url
@@ -222,22 +224,29 @@ pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenData, 
         warn!(error = %e, "Invalid token header");
         format!("invalid token header: {e}")
     })?;
-    let kid = header.kid.as_deref();
-    debug!(kid = ?kid, "Validating token");
+    // Require non-empty `kid`. AVS sets `AVS_SIGNING_KEY_ID` on every token,
+    // and rejecting missing/empty `kid` here removes the JWKS-ordering
+    // dependency (no silent fallback to `keys[0]`) and surfaces key rotation
+    // misconfiguration loudly.
+    let kid = header
+        .kid
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| {
+            warn!("Token header missing or empty `kid`");
+            "token header missing kid".to_string()
+        })?;
+    debug!(kid = %kid, "Validating token");
 
-    // Find matching key or try first key.
-    let decoding_key = if let Some(kid) = kid {
-        keys.iter()
-            .find(|(k, _)| k == kid)
-            .map(|(_, key)| key)
-            .ok_or_else(|| {
-                warn!(kid = %kid, "No matching key found in JWKS");
-                format!("no key found for kid: {kid}")
-            })?
-    } else {
-        debug!("Token has no kid, using first key from JWKS");
-        &keys[0].1
-    };
+    // Find matching key — exact `kid` match required, no fallback.
+    let decoding_key = keys
+        .iter()
+        .find(|(k, _)| k == kid)
+        .map(|(_, key)| key)
+        .ok_or_else(|| {
+            warn!(kid = %kid, "No matching key found in JWKS");
+            format!("no key found for kid: {kid}")
+        })?;
 
     // Configure validation.
     let mut validation = Validation::new(Algorithm::ES256);
@@ -293,7 +302,7 @@ pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenData, 
             .unwrap_or_else(|| "read_only".to_string()),
     };
 
-    info!(
+    debug!(
         sub = %result.sub,
         role = %result.role,
         "Token validated successfully"

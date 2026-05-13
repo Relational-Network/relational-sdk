@@ -18,23 +18,18 @@ pub const MAX_VALIDATION_ERRORS: usize = 100;
 /// Set per pool at creation time (see `PoolMetadata::validation_mode`). The
 /// dashboard infers a schema from the first CSV; users pick a mode that fits
 /// their ingestion source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationMode {
-    /// Skip validation entirely. Use for trusted ingest paths (e.g. ERP via
+    /// Skip validation entirely (legacy CSVs from trusted ETL pipelines like
     /// Jitterbit) where the data shape is guaranteed upstream.
     None,
     /// Verify the CSV's header is exactly the schema's column set (no extras,
     /// no missing). Skip per-cell type/length checks.
+    #[default]
     HeadersOnly,
     /// Full type, length, date, and flag checking against the schema.
     Strict,
-}
-
-impl Default for ValidationMode {
-    fn default() -> Self {
-        ValidationMode::HeadersOnly
-    }
 }
 
 /// Field type constraints supported by the CSV validator.
@@ -325,7 +320,7 @@ fn validate_decimal(value: &str, precision: u8, scale: u8) -> Option<String> {
 fn validate_date_lenient(value: &str) -> Option<String> {
     // Drop any time suffix so "01/02/2025 14:30" or "2025-02-01T14:30:00Z" both work.
     let date_part = value
-        .split_once(|c: char| c == ' ' || c == 'T')
+        .split_once([' ', 'T'])
         .map(|(d, _)| d)
         .unwrap_or(value);
 

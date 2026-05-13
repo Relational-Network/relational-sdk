@@ -333,7 +333,7 @@ async fn main() {
     {
         let url = avs_jwks_url();
         if url.starts_with("http://") {
-            let is_local = url.contains("127.0.0.1") || url.contains("localhost");
+            let is_local = config::is_loopback_http_jwks(&url);
             if !is_local {
                 tracing::error!(
                     jwks_url = %url,
@@ -354,7 +354,7 @@ async fn main() {
     {
         let url = avs_jwks_url();
         if url.starts_with("http://") {
-            let is_local = url.contains("127.0.0.1") || url.contains("localhost");
+            let is_local = config::is_loopback_http_jwks(&url);
             if !is_local && !config::ALLOW_HTTP_JWKS {
                 panic!(
                     "AVS_JWKS_URL is plain HTTP for a remote host: {url}. \

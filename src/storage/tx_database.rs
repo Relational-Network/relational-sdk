@@ -906,3 +906,75 @@ pub fn verify_cursor(token: &str) -> Option<String> {
         None
     }
 }
+
+// ── Tests ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Open a fresh on-disk database under a unique temp path.
+    ///
+    /// We use `std::env::temp_dir()` + the test process id so we don't add
+    /// `tempfile` as a dev-dependency just for a couple of tests. The file
+    /// is removed on success; on panic the OS cleans `/tmp` eventually.
+    fn fresh_db() -> (TxDatabase, std::path::PathBuf) {
+        let mut path = std::env::temp_dir();
+        let unique = format!(
+            "relational-sdk-test-{}-{}.redb",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        path.push(unique);
+        let db = TxDatabase::open(&path).expect("open temp redb");
+        (db, path)
+    }
+
+    /// Confirms the contract that `/v1/data/upload` relies on for replay
+    /// protection: the same nonce can only be inserted once.
+    ///
+    /// The HTTP handler in `src/handlers.rs` calls `record_nonce(&req.nonce)?`
+    /// and rejects with 409 when this returns `false`.
+    #[test]
+    fn record_nonce_rejects_replay() {
+        let (db, path) = fresh_db();
+
+        assert!(
+            db.record_nonce("nonce-abc").expect("record"),
+            "first insertion of a nonce must succeed (returns true == new)",
+        );
+        assert!(
+            !db.record_nonce("nonce-abc").expect("record"),
+            "replayed nonce must be detected (returns false == already present)",
+        );
+        assert!(
+            db.record_nonce("nonce-xyz").expect("record"),
+            "unrelated nonce must remain accepted",
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Confirms expired nonces are dropped so the table can't grow forever.
+    /// Passing a negative `max_age_secs` forces every entry past the cutoff.
+    #[test]
+    fn purge_expired_nonces_removes_old_entries() {
+        let (db, path) = fresh_db();
+
+        db.record_nonce("nonce-old").expect("record");
+        let removed = db.purge_expired_nonces(-1).expect("purge");
+        assert_eq!(
+            removed, 1,
+            "purge with negative max age must drop the entry"
+        );
+        assert!(
+            db.record_nonce("nonce-old").expect("record"),
+            "after purge the nonce slot is free again",
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+}
