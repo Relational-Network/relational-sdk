@@ -40,8 +40,10 @@ loader.env.SECRET_PROVISION_CONSTRUCTOR = "1"
 loader.env.SECRET_PROVISION_SET_KEY = "data_key"
 # AVS address: host:port of the secret-provisioning server. Per-environment, so passthrough.
 loader.env.SECRET_PROVISION_SERVERS = { passthrough = true }
-# CA cert that signs the AVS RA-TLS cert on port 4433. Bind-mounted at runtime:
-#   -v /opt/iob-micres/secrets/avs-tls.crt:/etc/ssl/certs/avs-ca.crt:ro
+# CA cert that signs the AVS RA-TLS cert on port 4433. Baked into the image as
+# /app/avs-ca.crt, mounted into the enclave at /etc/ssl/certs/avs-ca.crt, and
+# measured into MRENCLAVE via sgx.trusted_files below. Rotating the AVS cert
+# requires rebuilding the image and updating measurements.toml.
 loader.env.SECRET_PROVISION_CA_CHAIN_PATH = "/etc/ssl/certs/avs-ca.crt"
 
 # AVS URL for JWT validation (per-environment, passthrough).
@@ -74,6 +76,9 @@ fs.mounts = [
     # CA bundle for libcurl inside libdcap_quoteprov.so (Azure PCS HTTPS) and
     # for any outbound TLS from the Rust application (e.g. Solana RPC).
     { path = "/etc/ssl/certs/ca-certificates.crt", uri = "file:/app/ca-certificates.crt" },
+    # AVS RA-TLS trust anchor for libsecret_prov_attest.so (port 4433).
+    # Measured into MRENCLAVE via sgx.trusted_files below.
+    { path = "/etc/ssl/certs/avs-ca.crt", uri = "file:/app/avs-ca.crt" },
 
     # ========== ENCRYPTED PERSISTENT STORAGE ==========
     # Transparent per-page encryption via Gramine. Key "data_key" is provisioned
@@ -104,6 +109,7 @@ sgx.trusted_files = [
     "file:/app/dns/hosts",
     "file:/app/dns/nsswitch.conf",
     "file:/app/ca-certificates.crt",
+    "file:/app/avs-ca.crt",
 ]
 
 # Account for the main thread + Tokio workers (worker_threads = 2 in main.rs)

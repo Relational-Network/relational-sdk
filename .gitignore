@@ -16,4 +16,9 @@ attestation-client/ssl/ca.key
 # Encrypted data directory (Gramine sealed)
 /data/
 
+# Transient build-context staging of the AVS RA-TLS trust anchor.
+# `make docker-build` copies $(SECRETS_DIR)/avs-tls.crt here so the Dockerfile
+# can COPY it into /app/avs-ca.crt; the file is removed when the build exits.
+/avs-ca.crt
+
 SPRINT*

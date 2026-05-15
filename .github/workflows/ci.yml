@@ -239,6 +239,25 @@ jobs:
 
           echo "✓ Valid 3072-bit RSA key with exponent 3"
 
+      - name: Stage AVS RA-TLS trust anchor into build context
+        # The Dockerfile bakes /app/avs-ca.crt into the image and measures it
+        # into MRENCLAVE via sgx.trusted_files. The cert is public (only the
+        # matching avs-tls.key is sensitive), but we still load it from a GH
+        # secret so rotation goes through the same review/audit path as other
+        # release-affecting changes.
+        env:
+          AVS_TLS_CRT: ${{ secrets.AVS_TLS_CRT }}
+        run: |
+          if [ -z "${AVS_TLS_CRT:-}" ]; then
+            echo "::error::AVS_TLS_CRT secret is not set. Generate it by base64-decoding the AVS host's secrets/avs-tls.crt and storing the PEM contents in the AVS_TLS_CRT GitHub Actions secret."
+            exit 1
+          fi
+          printenv AVS_TLS_CRT > avs-ca.crt
+          if ! openssl x509 -in avs-ca.crt -noout -subject -issuer -dates; then
+            echo "::error::AVS_TLS_CRT does not parse as a PEM X.509 certificate."
+            exit 1
+          fi
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@v7

@@ -265,6 +265,12 @@ RUN mkdir -p /app/dns && \
 # SGX_QL_NETWORK_ERROR (0xE019) because the TLS handshake fails.
 RUN cp /etc/ssl/certs/ca-certificates.crt /app/ca-certificates.crt
 
+# AVS RA-TLS trust anchor for libsecret_prov_attest.so. Must be present in the
+# build context as avs-ca.crt (the Makefile docker-build target copies it from
+# ../attestation-verification-service/secrets/avs-tls.crt). Measured into
+# MRENCLAVE via sgx.trusted_files; rotating the AVS cert requires a rebuild.
+COPY avs-ca.crt /app/avs-ca.crt
+
 # Generate the Gramine manifest and rewrite sgx.trusted_files as an explicit
 # sorted list to avoid nondeterminism from recursive directory traversal order.
 RUN ENTRYPOINT=$(command -v gramine-ratls) && \
@@ -288,6 +294,7 @@ RUN ENTRYPOINT=$(command -v gramine-ratls) && \
       echo '    "file:/app/dns/hosts",'; \
       echo '    "file:/app/dns/nsswitch.conf",'; \
       echo '    "file:/app/ca-certificates.crt",'; \
+      echo '    "file:/app/avs-ca.crt",'; \
       find "${GRAMINE_RUNTIME_DIR}" /lib/x86_64-linux-gnu \
         -mindepth 1 \( -type f -o -type l \) -printf '%p\n' \
         | LC_ALL=C sort -u \
@@ -404,6 +411,7 @@ COPY --from=signer /app/relational-sdk.manifest.sgx /app/relational-sdk.manifest
 COPY --from=signer /app/relational-sdk.sig /app/relational-sdk.sig
 COPY --from=signer /app/dns /app/dns
 COPY --from=signer /app/ca-certificates.crt /app/ca-certificates.crt
+COPY --from=signer /app/avs-ca.crt /app/avs-ca.crt
 
 # Fixed service identity: deterministic UID/GID across every build.
 ARG APP_USER=relational

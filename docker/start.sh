@@ -149,7 +149,10 @@ prepare_data_dir() {
     # Auto-fix ownership so the non-root service user can write.
     # This runs as root before privilege drop, so it works whether the
     # host bind-mount was pre-created or auto-created by Docker (root:root).
-    chown "$(app_uid):$(app_gid)" "${DATA_DIR}"
+    # Recursive: legacy bind mounts may contain files written by earlier
+    # image revisions that ran as root; chown -R rebases them onto the
+    # service user so the app can reopen its existing database.
+    chown -R "$(app_uid):$(app_gid)" "${DATA_DIR}"
     chmod 0750 "${DATA_DIR}"
 
     if ! run_as_app test -w "${DATA_DIR}"; then

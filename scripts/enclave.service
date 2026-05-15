@@ -46,13 +46,13 @@ ExecStartPre=/bin/bash -c 'for i in {1..60}; do curl -sf http://127.0.0.1:9100/.
 # - Uses host networking for localhost AVS communication
 # - Passes through SGX devices for enclave execution
 # - Mounts data directory for persistent encrypted storage
-# - Mounts AVS TLS cert as the CA cert for secret provisioning verification
+# - AVS RA-TLS trust anchor is baked into the image at /app/avs-ca.crt
+#   (measured into MRENCLAVE via sgx.trusted_files) — no runtime bind-mount.
 ExecStart=/usr/bin/docker run --rm --name enclave \
     --network host \
     --device /dev/sgx/enclave \
     --device /dev/sgx/provision \
-    -v /opt/iob-micres/data:/app/data \
-    -v /opt/iob-micres/secrets/avs-tls.crt:/etc/ssl/certs/avs-ca.crt:ro \
+    -v /opt/iob-micres/data:/data \
     -e AVS_JWKS_URL \
     -e SECRET_PROVISION_SERVERS=127.0.0.1:4433 \
     -e RUST_LOG \

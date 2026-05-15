@@ -179,8 +179,18 @@ show-measurements: relational-sdk.sig
 SGX_SIGNING_KEY ?= $(if $(SIGNING_KEY),$(SIGNING_KEY),$(HOME)/.config/gramine/enclave-key.pem)
 
 .PHONY: docker-build
+# The AVS RA-TLS trust anchor is baked into the image as /app/avs-ca.crt and
+# measured into MRENCLAVE. Stage it into the build context first, run the
+# build, then remove it whether the build succeeded or failed.
 docker-build:
-	@cd docker && sudo SGX_SIGNING_KEY="$(SGX_SIGNING_KEY)" ./build.sh ubuntu20
+	@if [ ! -f "$(SECRETS_DIR)/avs-tls.crt" ]; then \
+		echo "ERROR: $(SECRETS_DIR)/avs-tls.crt not found."; \
+		echo "Run: cd ../attestation-verification-service && ./secrets/generate-keys.sh"; \
+		exit 1; \
+	fi
+	@cp "$(SECRETS_DIR)/avs-tls.crt" avs-ca.crt && \
+		( cd docker && sudo SGX_SIGNING_KEY="$(SGX_SIGNING_KEY)" ./build.sh ubuntu20 ); \
+		status=$$?; rm -f avs-ca.crt; exit $$status
 
 .PHONY: docker-run
 # Auth & CORS env vars are loaded from .env via --env-file.
@@ -201,7 +211,6 @@ docker-run:
 		--device /dev/sgx/provision \
 		--stop-timeout 30 \
 		-v "$(DATA_DIR):/data" \
-		-v "$(abspath $(SECRETS_DIR)/avs-tls.crt):/etc/ssl/certs/avs-ca.crt:ro" \
 		-e SECRET_PROVISION_SERVERS=127.0.0.1:4433 \
 		$$( [ -f .env ] && echo "--env-file .env" ) \
 		relationalnetwork/relational-sdk:focal || status=$$?; \
@@ -251,6 +260,12 @@ verify-mrenclave:
 		echo "Set SGX_SIGNING_KEY=/path/to/enclave-key.pem"; \
 		exit 1; \
 	fi
+	@if [ ! -f "$(SECRETS_DIR)/avs-tls.crt" ]; then \
+		echo "ERROR: $(SECRETS_DIR)/avs-tls.crt not found."; \
+		echo "Run: cd ../attestation-verification-service && ./secrets/generate-keys.sh"; \
+		exit 1; \
+	fi
+	@cp "$(SECRETS_DIR)/avs-tls.crt" avs-ca.crt
 	@echo "=== Building locally (no cache) ==="
 	@cd docker && sudo DOCKER_BUILDKIT=1 SGX_SIGNING_KEY="$(SGX_SIGNING_KEY)" docker build \
 		--platform linux/amd64 \
@@ -259,7 +274,9 @@ verify-mrenclave:
 		--secret id=sgx-key,src="$(SGX_SIGNING_KEY)" \
 		-t relationalnetwork/relational-sdk:verify-local \
 		-f Dockerfile \
-		.. >/dev/null
+		.. >/dev/null; \
+		build_status=$$?; rm -f ../avs-ca.crt; \
+		if [ "$$build_status" -ne 0 ]; then exit "$$build_status"; fi
 	@BUILT_MR=$$(sudo docker run --rm \
 		--entrypoint gramine-sgx-sigstruct-view \
 		relationalnetwork/relational-sdk:verify-local \
