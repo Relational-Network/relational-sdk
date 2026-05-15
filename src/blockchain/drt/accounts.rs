@@ -28,9 +28,7 @@ fn strip_discriminator<'a>(
     }
     let disc: [u8; 8] = data[..8].try_into().unwrap();
     if &disc != expected {
-        return Err(ApiError::internal(format!(
-            "invalid {label} discriminator"
-        )));
+        return Err(ApiError::internal(format!("invalid {label} discriminator")));
     }
     let payload = &data[8..];
     if payload.len() > max {

@@ -101,10 +101,7 @@ pub fn validate_drt_requests(
     for d in drts {
         validate_drt_name(&d.name)?;
         if !seen.insert(d.name.clone()) {
-            return Err(ApiError::bad_request(format!(
-                "duplicate DRT '{}'",
-                d.name
-            )));
+            return Err(ApiError::bad_request(format!("duplicate DRT '{}'", d.name)));
         }
         if !allow_append && d.name == APPEND_DRT_NAME {
             return Err(ApiError::bad_request(

@@ -117,6 +117,65 @@ pub(crate) fn explorer_url(state: &AppState, sig: &str) -> String {
     state.solana_client.network().explorer_tx_url(sig)
 }
 
+/// Build the on-chain provenance block embedded in every audit `details` JSON.
+///
+/// `chain.events` is the unmodified Anchor decode — what an auditor would get
+/// by replaying the signature against chain state. `chain.labels` is an
+/// **off-chain** convenience map (pool name, DRT name lookups by right_id /
+/// mint / drt_config PDA, the owner's wallet) so the dashboard can render
+/// human-meaningful aliases without polluting the on-chain section. Auditors
+/// ignore `labels` and verify against `events`.
+pub(crate) fn chain_section(
+    signatures: &[String],
+    events: &[DrtEvent],
+    labels: serde_json::Value,
+) -> serde_json::Value {
+    let decoded: Vec<_> = events.iter().map(DrtEvent::to_response).collect();
+    serde_json::json!({
+        "program_id": crate::config::DRT_PROGRAM_ID_STR,
+        "tx_signatures": signatures,
+        "events": decoded,
+        "labels": labels,
+    })
+}
+
+/// Build an id→human-name map for a pool — DRT names keyed by right_id (hex),
+/// mint pubkey, and drt_config PDA. Use [`chain_section`] with the result.
+///
+/// `extra` lets callers inject additional id→label pairs (e.g. commitment hash
+/// → record_id for credential issuance / revocation events) before merging.
+pub(crate) fn pool_labels(
+    meta: &crate::storage::pool_metadata::PoolMetadata,
+    extra: Option<serde_json::Map<String, serde_json::Value>>,
+) -> serde_json::Value {
+    let mut id_to_name: serde_json::Map<String, serde_json::Value> = extra.unwrap_or_default();
+    let pool_pk = Pubkey::from_str(&meta.pool_pda).ok();
+    for (name, drt) in &meta.drts {
+        let nm = serde_json::Value::String(name.clone());
+        id_to_name.insert(drt.right_id_hex.clone(), nm.clone());
+        id_to_name.insert(drt.mint.clone(), nm.clone());
+        if let (Some(pk), Ok(rid_bytes)) = (pool_pk, hex::decode(&drt.right_id_hex)) {
+            if let Ok(rid) = <[u8; 16]>::try_from(rid_bytes.as_slice()) {
+                let (config, _) = derive_drt_config_pda(&pk, &rid);
+                id_to_name.insert(config.to_string(), nm);
+            }
+        }
+    }
+    if let Some(owner) = meta.owner_pubkey.as_ref() {
+        id_to_name
+            .entry(owner.clone())
+            .or_insert_with(|| serde_json::Value::String("pool owner".to_string()));
+    }
+    id_to_name
+        .entry(meta.pool_pda.clone())
+        .or_insert_with(|| serde_json::Value::String(meta.pool_name.clone()));
+    serde_json::json!({
+        "pool_name": meta.pool_name,
+        "owner_wallet": meta.owner_pubkey,
+        "id_to_name": id_to_name,
+    })
+}
+
 fn new_uuid_bytes() -> [u8; 16] {
     *uuid::Uuid::new_v4().as_bytes()
 }
@@ -127,10 +186,17 @@ fn new_uuid_bytes() -> [u8; 16] {
 /// schema id is an internal handle the dashboard does not surface, so the
 /// operator never has to invent one.
 fn parse_schema(req: &InlineSchemaRequest) -> Result<(String, Vec<FieldSchema>), ApiError> {
-    let schema_id = match req.schema_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let schema_id = match req
+        .schema_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(s) => {
             if s.len() > 128
-                || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                || !s
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
             {
                 return Err(ApiError::bad_request(
                     "schema_id must be 1-128 chars, alphanumeric + hyphen/underscore",
@@ -170,6 +236,7 @@ struct CreatedPool {
     pool_uuid: [u8; 16],
     signatures: Vec<String>,
     drts: BTreeMap<String, DrtMetadata>,
+    events: Vec<DrtEvent>,
 }
 
 async fn create_pool_atomic(
@@ -219,13 +286,14 @@ async fn create_pool_atomic(
     }
     ixs.push(build_seal_pool(&owner_pk, &pool_pda));
 
-    let (sig, _events) = sign_send_and_parse(state, owner_keypair, ixs, "confirmed").await?;
+    let (sig, events) = sign_send_and_parse(state, owner_keypair, ixs, "confirmed").await?;
 
     Ok(CreatedPool {
         pool_pda,
         pool_uuid,
         signatures: vec![sig],
         drts: drt_records,
+        events,
     })
 }
 
@@ -268,7 +336,7 @@ fn persist_pool_metadata(
     };
     state
         .storage
-        .write_json(&paths.pool_meta(pool_pda), &meta)
+        .write_json(paths.pool_meta(pool_pda), &meta)
         .map_err(|e| ApiError::internal(format!("failed to write pool metadata: {e}")))?;
     if let Err(e) = state.tx_db.upsert_pool_meta(&meta) {
         warn!(pool = %pool_pda, error = %e, "Failed to write pool meta to redb");
@@ -356,6 +424,7 @@ pub async fn create_malta_pool(
             "tx_signatures": created.signatures,
             "schema_id": schema_id,
             "drt_count": meta.drts.len(),
+            "chain": chain_section(&created.signatures, &created.events, pool_labels(&meta, None)),
         }));
     crate::storage::audit::AuditRepository::new(&state.storage)
         .with_tx_db(&state.tx_db)
@@ -453,6 +522,7 @@ pub async fn create_iob_erp_pool(
             "pool_uuid": pool_uuid_hex,
             "tx_signatures": created.signatures,
             "drt_count": meta.drts.len(),
+            "chain": chain_section(&created.signatures, &created.events, pool_labels(&meta, None)),
         }));
     crate::storage::audit::AuditRepository::new(&state.storage)
         .with_tx_db(&state.tx_db)

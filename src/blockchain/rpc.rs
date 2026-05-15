@@ -295,10 +295,7 @@ impl JsonRpcClient {
     /// `getTokenSupply` → current circulating SPL supply for a mint.
     ///
     /// Returns the live, on-chain remaining supply (minted minus burned).
-    pub async fn get_token_supply(
-        &self,
-        mint: &Pubkey,
-    ) -> Result<TokenAmountInfo, RpcError> {
+    pub async fn get_token_supply(&self, mint: &Pubkey) -> Result<TokenAmountInfo, RpcError> {
         let ctx: RpcContext<TokenAmountInfo> = self
             .call_typed(
                 "getTokenSupply",

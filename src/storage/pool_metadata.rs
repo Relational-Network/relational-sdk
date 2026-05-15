@@ -10,19 +10,14 @@ use std::collections::BTreeMap;
 use crate::data_validation::ValidationMode;
 
 /// Operational shape of the pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolKind {
     /// CSV-driven pool. Admin uploads CSVs; schema mandatory, headers-only validation.
+    #[default]
     Malta,
     /// ERP-driven pool. Data arrives via Jitterbit; no `append` DRT.
     IobErp,
-}
-
-impl Default for PoolKind {
-    fn default() -> Self {
-        PoolKind::Malta
-    }
 }
 
 /// Pool lifecycle state.

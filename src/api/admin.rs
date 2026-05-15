@@ -457,15 +457,10 @@ pub async fn grant_right(
     // Load pool meta and locate the requested DRT.
     let meta = crate::api::pools::load_pool_meta(&state, &pool_pda_str)?;
     if meta.kind == PoolKind::IobErp && payload.drt_name == "append" {
-        return Err(ApiError::bad_request(
-            "IOB ERP pools have no 'append' DRT",
-        ));
+        return Err(ApiError::bad_request("IOB ERP pools have no 'append' DRT"));
     }
     let drt = meta.drts.get(&payload.drt_name).ok_or_else(|| {
-        ApiError::not_found(format!(
-            "DRT '{}' not found in pool",
-            payload.drt_name
-        ))
+        ApiError::not_found(format!("DRT '{}' not found in pool", payload.drt_name))
     })?;
     let right_id = crate::api::credentials::decode_right_id(&drt.right_id_hex)?;
     let pool_uuid = crate::api::credentials::decode_right_id(&meta.pool_uuid_hex)?;
@@ -483,13 +478,19 @@ pub async fn grant_right(
     // Build + send.
     let commitment = compute_commitment(&payload.analyst_id, &pool_uuid, &right_id);
     let (grant_pda, _) = derive_grant_pda(&commitment);
-    let ix = build_grant_right(&pool_pda, &drt_config_pda, &mint, &keypair.pubkey(), &commitment);
-    let (sig, _events) =
+    let ix = build_grant_right(
+        &pool_pda,
+        &drt_config_pda,
+        &mint,
+        &keypair.pubkey(),
+        &commitment,
+    );
+    let (sig, events) =
         crate::api::pools::sign_send_and_parse(&state, &keypair, vec![ix], "finalized").await?;
 
     let evt = AuditEvent::new(AuditEventType::RightGranted)
         .with_user(&token.sub)
-        .with_resource("drt_grant", &grant_pda.to_string())
+        .with_resource("drt_grant", grant_pda.to_string())
         .with_pool_pda(&pool_pda_str)
         .with_details(serde_json::json!({
             "pool_pda": pool_pda_str,
@@ -497,6 +498,22 @@ pub async fn grant_right(
             "analyst_id_hash": hex::encode(commitment),
             "grant_pda": grant_pda.to_string(),
             "tx_signature": sig,
+            "chain": crate::api::pools::chain_section(
+                std::slice::from_ref(&sig),
+                &events,
+                {
+                    let mut extra = serde_json::Map::new();
+                    extra.insert(
+                        hex::encode(commitment),
+                        serde_json::Value::String(format!("grant of '{}' to analyst", payload.drt_name)),
+                    );
+                    extra.insert(
+                        grant_pda.to_string(),
+                        serde_json::Value::String(format!("grant of '{}'", payload.drt_name)),
+                    );
+                    crate::api::pools::pool_labels(&meta, Some(extra))
+                },
+            ),
         }));
     AuditRepository::new(&state.storage)
         .with_tx_db(&state.tx_db)
@@ -630,10 +647,7 @@ pub async fn revoke_grant(
 
     let meta = crate::api::pools::load_pool_meta(&state, &pool_pda_str)?;
     let drt = meta.drts.get(&payload.drt_name).ok_or_else(|| {
-        ApiError::not_found(format!(
-            "DRT '{}' not found in pool",
-            payload.drt_name
-        ))
+        ApiError::not_found(format!("DRT '{}' not found in pool", payload.drt_name))
     })?;
     let right_id = crate::api::credentials::decode_right_id(&drt.right_id_hex)?;
     let pool_uuid = crate::api::credentials::decode_right_id(&meta.pool_uuid_hex)?;
@@ -648,12 +662,12 @@ pub async fn revoke_grant(
     let commitment = compute_commitment(&payload.analyst_id, &pool_uuid, &right_id);
     let (grant_pda, _) = derive_grant_pda(&commitment);
     let ix = build_revoke_grant(&keypair.pubkey(), &pool_pda, &drt_config_pda, &commitment);
-    let (sig, _events) =
+    let (sig, events) =
         crate::api::pools::sign_send_and_parse(&state, &keypair, vec![ix], "finalized").await?;
 
     let evt = AuditEvent::new(AuditEventType::RightRevoked)
         .with_user(&token.sub)
-        .with_resource("drt_grant", &grant_pda.to_string())
+        .with_resource("drt_grant", grant_pda.to_string())
         .with_pool_pda(&pool_pda_str)
         .with_details(serde_json::json!({
             "pool_pda": pool_pda_str,
@@ -661,6 +675,22 @@ pub async fn revoke_grant(
             "analyst_id_hash": hex::encode(commitment),
             "grant_pda": grant_pda.to_string(),
             "tx_signature": sig,
+            "chain": crate::api::pools::chain_section(
+                std::slice::from_ref(&sig),
+                &events,
+                {
+                    let mut extra = serde_json::Map::new();
+                    extra.insert(
+                        hex::encode(commitment),
+                        serde_json::Value::String(format!("revoked '{}' grant", payload.drt_name)),
+                    );
+                    extra.insert(
+                        grant_pda.to_string(),
+                        serde_json::Value::String(format!("revoked grant of '{}'", payload.drt_name)),
+                    );
+                    crate::api::pools::pool_labels(&meta, Some(extra))
+                },
+            ),
         }));
     AuditRepository::new(&state.storage)
         .with_tx_db(&state.tx_db)

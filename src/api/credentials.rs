@@ -816,14 +816,14 @@ pub async fn issue_credentials(
         &commitment,
     );
 
-    let (sig_str, _events) =
-        match sign_send_and_parse(&state, &keypair, vec![ix], "finalized").await {
-            Ok(result) => result,
-            Err(e) => {
-                // DRT not burned — clean failure.
-                return Err(e);
-            }
-        };
+    let (sig_str, events) = match sign_send_and_parse(&state, &keypair, vec![ix], "finalized").await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            // DRT not burned — clean failure.
+            return Err(e);
+        }
+    };
 
     // 2. Store CSV dataset.
     let dataset_dir = state.storage.paths().pool_dataset_dir(&pool_pda_str);
@@ -846,7 +846,19 @@ pub async fn issue_credentials(
                 "pool_pda": pool_pda_str,
                 "record_id": record_id,
                 "redeem_tx_sig": sig_str,
-                "error": e.to_string()
+                "error": e.to_string(),
+                "chain": crate::api::pools::chain_section(
+                    std::slice::from_ref(&sig_str),
+                    &events,
+                    {
+                        let mut extra = serde_json::Map::new();
+                        extra.insert(
+                            hex::encode(commitment),
+                            serde_json::Value::String(format!("upload {record_id}")),
+                        );
+                        crate::api::pools::pool_labels(&meta, Some(extra))
+                    },
+                ),
             }));
         AuditRepository::new(&state.storage)
             .with_tx_db(&state.tx_db)
@@ -905,7 +917,19 @@ pub async fn issue_credentials(
             "record_id": record_id,
             "row_count": row_count,
             "redeem_tx_sig": sig_str,
-            "total_credentials": updated_meta.total_credentials
+            "total_credentials": updated_meta.total_credentials,
+            "chain": crate::api::pools::chain_section(
+                std::slice::from_ref(&sig_str),
+                &events,
+                {
+                    let mut extra = serde_json::Map::new();
+                    extra.insert(
+                        hex::encode(commitment),
+                        serde_json::Value::String(format!("upload {record_id}")),
+                    );
+                    crate::api::pools::pool_labels(&updated_meta, Some(extra))
+                },
+            ),
         }));
     AuditRepository::new(&state.storage)
         .with_tx_db(&state.tx_db)
