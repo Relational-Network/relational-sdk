@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Relational Network
 
-//! Raw Solana instruction builders for the DRT program.
+//! Raw Solana instruction builders for the `digital_rights_tokens` program.
 //!
-//! Each function returns a `solana_instruction::Instruction` ready to
-//! be included in a transaction. No `anchor-client` dependency — we build
-//! the instruction data directly with the 8-byte Anchor discriminator
-//! followed by Borsh-serialized arguments.
+//! Each function returns a `solana_instruction::Instruction` ready to be
+//! included in a transaction. No `anchor-client` dependency — we build the
+//! instruction data directly with the 8-byte Anchor discriminator followed by
+//! Borsh-serialized arguments.
 
 use borsh::BorshSerialize;
 use solana_instruction::{AccountMeta, Instruction};
@@ -14,24 +14,22 @@ use solana_pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
-use super::pda::{derive_extra_metas_pda, derive_mint_pda, derive_vault_ata};
+use super::pda::{derive_drt_config_pda, derive_grant_pda, derive_mint_pda, derive_user_ata};
 use super::types::*;
 use crate::config::drt_program_id;
+
+// ============================================================================
+// Helpers
+// ============================================================================
 
 fn system_program_id() -> Pubkey {
     static ID: OnceLock<Pubkey> = OnceLock::new();
     *ID.get_or_init(|| Pubkey::from_str(SYSTEM_PROGRAM_ID_STR).expect("valid system program ID"))
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-fn token_2022_program_id() -> Pubkey {
+fn token_program_id() -> Pubkey {
     static ID: OnceLock<Pubkey> = OnceLock::new();
-    *ID.get_or_init(|| {
-        Pubkey::from_str(TOKEN_2022_PROGRAM_ID_STR).expect("valid Token-2022 program ID")
-    })
+    *ID.get_or_init(|| Pubkey::from_str(TOKEN_PROGRAM_ID_STR).expect("valid SPL Token program ID"))
 }
 
 fn associated_token_program_id() -> Pubkey {
@@ -41,6 +39,11 @@ fn associated_token_program_id() -> Pubkey {
     })
 }
 
+fn rent_sysvar_id() -> Pubkey {
+    static ID: OnceLock<Pubkey> = OnceLock::new();
+    *ID.get_or_init(|| Pubkey::from_str(RENT_SYSVAR_ID_STR).expect("valid rent sysvar ID"))
+}
+
 /// Build a `ComputeBudgetProgram::SetComputeUnitLimit` instruction.
 pub fn build_compute_budget_ix(units: u32) -> Instruction {
     static COMPUTE_BUDGET_ID: OnceLock<Pubkey> = OnceLock::new();
@@ -48,12 +51,8 @@ pub fn build_compute_budget_ix(units: u32) -> Instruction {
         Pubkey::from_str("ComputeBudget111111111111111111111111111111")
             .expect("valid ComputeBudget program ID")
     });
-    // ComputeBudget instruction index 2 = SetComputeUnitLimit, followed by u32 LE.
-    let data = {
-        let mut buf = vec![2u8]; // instruction type
-        buf.extend_from_slice(&units.to_le_bytes());
-        buf
-    };
+    let mut data = vec![2u8]; // SetComputeUnitLimit
+    data.extend_from_slice(&units.to_le_bytes());
     Instruction {
         program_id,
         accounts: vec![],
@@ -62,200 +61,175 @@ pub fn build_compute_budget_ix(units: u32) -> Instruction {
 }
 
 // ============================================================================
-// create_pool_atomic
+// create_pool
 // ============================================================================
 
-/// Build the `create_pool_atomic` instruction.
+/// Build the `create_pool` instruction.
 ///
-/// Named accounts: pool (PDA, writable), owner (signer, writable),
-/// token_program, associated_token_program, system_program.
-///
-/// Remaining accounts per DRT: [mint (writable), vault (writable), extra_metas (writable)].
-pub fn build_create_pool_atomic(
-    owner: &Pubkey,
-    pool_pda: &Pubkey,
-    pool_name: &str,
-    drt_configs: &[DrtInitConfig],
-) -> Result<Vec<Instruction>, String> {
-    let program_id = drt_program_id();
-
-    // Serialize instruction data: discriminator + args (name: String, drt_configs: Vec<DrtInitConfig>).
-    let mut data = Vec::new();
-    data.extend_from_slice(&DISC_CREATE_POOL_ATOMIC);
-    pool_name
-        .to_string()
-        .serialize(&mut data)
-        .map_err(|e| format!("Borsh serialize pool_name: {e}"))?;
-    drt_configs
-        .to_vec()
-        .serialize(&mut data)
-        .map_err(|e| format!("Borsh serialize drt_configs: {e}"))?;
-
-    // Named accounts.
-    let mut accounts = vec![
-        AccountMeta::new(*pool_pda, false), // pool (writable, not signer)
-        AccountMeta::new(*owner, true),     // owner (writable, signer)
-        AccountMeta::new_readonly(token_2022_program_id(), false), // token_program
-        AccountMeta::new_readonly(associated_token_program_id(), false), // associated_token_program
-        AccountMeta::new_readonly(system_program_id(), false), // system_program
-    ];
-
-    // Remaining accounts: 3 per DRT (mint, vault, extra_metas).
-    for cfg in drt_configs {
-        let (mint_pda, _) = derive_mint_pda(pool_pda, &cfg.drt_type);
-        let vault_ata = derive_vault_ata(pool_pda, &mint_pda);
-        let (extra_metas_pda, _) = derive_extra_metas_pda(&mint_pda);
-
-        accounts.push(AccountMeta::new(mint_pda, false)); // writable
-        accounts.push(AccountMeta::new(vault_ata, false)); // writable
-        accounts.push(AccountMeta::new(extra_metas_pda, false)); // writable
-    }
-
-    let main_ix = Instruction {
-        program_id,
-        accounts,
-        data,
-    };
-
-    // Include compute budget instruction for multi-DRT transactions.
-    Ok(vec![build_compute_budget_ix(800_000), main_ix])
-}
-
-// ============================================================================
-// buy_drt
-// ============================================================================
-
-/// Build the `buy_drt` instruction.
-///
-/// Pass `hook_enabled = true` to add the 2 extra remaining accounts required
-/// for DRTs with transfer hooks.
-pub fn build_buy_drt(
-    pool_pda: &Pubkey,
-    pool_owner: &Pubkey,
-    buyer: &Pubkey,
-    drt_type: &str,
-    amount: u64,
-    mint: &Pubkey,
-    hook_enabled: bool,
-) -> Result<Instruction, String> {
-    let program_id = drt_program_id();
-
-    // Serialize instruction data: discriminator + drt_type + amount.
-    let mut data = Vec::new();
-    data.extend_from_slice(&DISC_BUY_DRT);
-    drt_type
-        .to_string()
-        .serialize(&mut data)
-        .map_err(|e| format!("Borsh serialize drt_type: {e}"))?;
-    amount
-        .serialize(&mut data)
-        .map_err(|e| format!("Borsh serialize amount: {e}"))?;
-
-    let vault_ata = derive_vault_ata(pool_pda, mint);
-    let buyer_ata = super::pda::derive_user_ata(buyer, mint);
-
-    let mut accounts = vec![
-        AccountMeta::new_readonly(*pool_pda, false), // pool
-        AccountMeta::new(*mint, false),              // drt_mint (writable)
-        AccountMeta::new(vault_ata, false),          // vault_token_account (writable)
-        AccountMeta::new(*buyer, true),              // buyer (signer, writable)
-        AccountMeta::new(buyer_ata, false),          // buyer_token_account (writable)
-        AccountMeta::new(*pool_owner, false),        // pool_owner (writable)
-        AccountMeta::new_readonly(token_2022_program_id(), false), // token_program
-        AccountMeta::new_readonly(associated_token_program_id(), false), // associated_token_program
-        AccountMeta::new_readonly(system_program_id(), false), // system_program
-    ];
-
-    // Hook remaining accounts.
-    if hook_enabled {
-        let (extra_metas_pda, _) = derive_extra_metas_pda(mint);
-        accounts.push(AccountMeta::new_readonly(extra_metas_pda, false));
-        accounts.push(AccountMeta::new_readonly(program_id, false));
-    }
-
-    Ok(Instruction {
-        program_id,
-        accounts,
-        data,
-    })
-}
-
-// ============================================================================
-// redeem_drt
-// ============================================================================
-
-/// Build the `redeem_drt` instruction (burns 1 token).
-pub fn build_redeem_drt(
-    pool_pda: &Pubkey,
-    user: &Pubkey,
-    drt_type: &str,
-    mint: &Pubkey,
-) -> Result<Instruction, String> {
-    let program_id = drt_program_id();
-
-    let mut data = Vec::new();
-    data.extend_from_slice(&DISC_REDEEM_DRT);
-    drt_type
-        .to_string()
-        .serialize(&mut data)
-        .map_err(|e| format!("Borsh serialize drt_type: {e}"))?;
-
-    let user_ata = super::pda::derive_user_ata(user, mint);
+/// Accounts (in IDL order): owner (writable, signer), pool (PDA, writable),
+/// system_program.
+pub fn build_create_pool(owner: &Pubkey, pool_pda: &Pubkey, pool_uuid: &[u8; 16]) -> Instruction {
+    let mut data = Vec::with_capacity(8 + 16);
+    data.extend_from_slice(&DISC_CREATE_POOL);
+    data.extend_from_slice(pool_uuid);
 
     let accounts = vec![
-        AccountMeta::new_readonly(*pool_pda, false), // pool
-        AccountMeta::new(*mint, false),              // drt_mint (writable)
-        AccountMeta::new(*user, true),               // user (signer, writable)
-        AccountMeta::new(user_ata, false),           // user_token_account (writable)
-        AccountMeta::new_readonly(token_2022_program_id(), false), // token_program
+        AccountMeta::new(*owner, true),
+        AccountMeta::new(*pool_pda, false),
+        AccountMeta::new_readonly(system_program_id(), false),
+    ];
+
+    Instruction {
+        program_id: drt_program_id(),
+        accounts,
+        data,
+    }
+}
+
+// ============================================================================
+// register_drt
+// ============================================================================
+
+/// Build the `register_drt` instruction.
+///
+/// Accounts (in IDL order): owner (writable, signer), pool, drt_config
+/// (writable), mint (writable), holder, holder_ata (writable), token_program,
+/// associated_token_program, system_program, rent.
+pub fn build_register_drt(
+    owner: &Pubkey,
+    pool_pda: &Pubkey,
+    holder: &Pubkey,
+    right_id: &[u8; 16],
+    code_repo_url: &str,
+    code_hash: &[u8; 32],
+    supply: u64,
+) -> Result<Instruction, String> {
+    let (drt_config_pda, _) = derive_drt_config_pda(pool_pda, right_id);
+    let (mint_pda, _) = derive_mint_pda(pool_pda, right_id);
+    let holder_ata = derive_user_ata(holder, &mint_pda);
+
+    let mut data = Vec::new();
+    data.extend_from_slice(&DISC_REGISTER_DRT);
+    data.extend_from_slice(right_id);
+    code_repo_url
+        .to_string()
+        .serialize(&mut data)
+        .map_err(|e| format!("Borsh serialize code_repo_url: {e}"))?;
+    data.extend_from_slice(code_hash);
+    data.extend_from_slice(&supply.to_le_bytes());
+
+    let accounts = vec![
+        AccountMeta::new(*owner, true),
+        AccountMeta::new_readonly(*pool_pda, false),
+        AccountMeta::new(drt_config_pda, false),
+        AccountMeta::new(mint_pda, false),
+        AccountMeta::new_readonly(*holder, false),
+        AccountMeta::new(holder_ata, false),
+        AccountMeta::new_readonly(token_program_id(), false),
+        AccountMeta::new_readonly(associated_token_program_id(), false),
+        AccountMeta::new_readonly(system_program_id(), false),
+        AccountMeta::new_readonly(rent_sysvar_id(), false),
     ];
 
     Ok(Instruction {
-        program_id,
+        program_id: drt_program_id(),
         accounts,
         data,
     })
 }
 
 // ============================================================================
-// close_pool
+// grant_right
 // ============================================================================
 
-/// Build the `close_pool` instruction.
+/// Build the `grant_right` instruction (burns 1 token + creates Grant PDA).
 ///
-/// Remaining accounts: per DRT in the pool, 3 accounts
-/// `[mint (writable), vault (writable), extra_metas_or_placeholder]`.
-/// For non-hook mints, use `SystemProgram` as placeholder.
-pub fn build_close_pool(pool_pda: &Pubkey, owner: &Pubkey, drts: &[DrtConfig]) -> Instruction {
-    let program_id = drt_program_id();
+/// Accounts (in IDL order): pool, drt_config, mint (writable), holder
+/// (writable, signer), holder_ata (writable), grant (writable, PDA from
+/// commitment), token_program, system_program.
+pub fn build_grant_right(
+    pool_pda: &Pubkey,
+    drt_config_pda: &Pubkey,
+    mint: &Pubkey,
+    holder: &Pubkey,
+    commitment: &[u8; 32],
+) -> Instruction {
+    let holder_ata = derive_user_ata(holder, mint);
+    let (grant_pda, _) = derive_grant_pda(commitment);
 
-    let data = DISC_CLOSE_POOL.to_vec();
+    let mut data = Vec::with_capacity(8 + 32);
+    data.extend_from_slice(&DISC_GRANT_RIGHT);
+    data.extend_from_slice(commitment);
 
-    let mut accounts = vec![
-        AccountMeta::new(*pool_pda, false), // pool (writable)
-        AccountMeta::new(*owner, true),     // owner (signer, writable)
-        AccountMeta::new_readonly(token_2022_program_id(), false), // token_program
-        AccountMeta::new_readonly(system_program_id(), false), // system_program
+    let accounts = vec![
+        AccountMeta::new_readonly(*pool_pda, false),
+        AccountMeta::new_readonly(*drt_config_pda, false),
+        AccountMeta::new(*mint, false),
+        AccountMeta::new(*holder, true),
+        AccountMeta::new(holder_ata, false),
+        AccountMeta::new(grant_pda, false),
+        AccountMeta::new_readonly(token_program_id(), false),
+        AccountMeta::new_readonly(system_program_id(), false),
     ];
 
-    for drt in drts {
-        let mint = drt.mint;
-        let vault = derive_vault_ata(pool_pda, &mint);
-
-        accounts.push(AccountMeta::new(mint, false)); // writable
-        accounts.push(AccountMeta::new(vault, false)); // writable
-
-        if drt.enable_transfer_hook {
-            let (extra_metas, _) = derive_extra_metas_pda(&mint);
-            accounts.push(AccountMeta::new(extra_metas, false)); // writable
-        } else {
-            // Placeholder — system program as non-writable.
-            accounts.push(AccountMeta::new_readonly(system_program_id(), false));
-        }
+    Instruction {
+        program_id: drt_program_id(),
+        accounts,
+        data,
     }
+}
+
+// ============================================================================
+// revoke_grant
+// ============================================================================
+
+/// Build the `revoke_grant` instruction.
+///
+/// Accounts (in IDL order): owner (writable, signer), pool, drt_config, grant
+/// (writable).
+pub fn build_revoke_grant(
+    owner: &Pubkey,
+    pool_pda: &Pubkey,
+    drt_config_pda: &Pubkey,
+    commitment: &[u8; 32],
+) -> Instruction {
+    let (grant_pda, _) = derive_grant_pda(commitment);
+
+    let mut data = Vec::with_capacity(8 + 32);
+    data.extend_from_slice(&DISC_REVOKE_GRANT);
+    data.extend_from_slice(commitment);
+
+    let accounts = vec![
+        AccountMeta::new(*owner, true),
+        AccountMeta::new_readonly(*pool_pda, false),
+        AccountMeta::new_readonly(*drt_config_pda, false),
+        AccountMeta::new(grant_pda, false),
+    ];
 
     Instruction {
-        program_id,
+        program_id: drt_program_id(),
+        accounts,
+        data,
+    }
+}
+
+// ============================================================================
+// seal_pool
+// ============================================================================
+
+/// Build the `seal_pool` instruction.
+///
+/// Accounts (in IDL order): owner (signer), pool (writable).
+pub fn build_seal_pool(owner: &Pubkey, pool_pda: &Pubkey) -> Instruction {
+    let data = DISC_SEAL_POOL.to_vec();
+
+    let accounts = vec![
+        AccountMeta::new_readonly(*owner, true),
+        AccountMeta::new(*pool_pda, false),
+    ];
+
+    Instruction {
+        program_id: drt_program_id(),
         accounts,
         data,
     }

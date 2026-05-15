@@ -43,6 +43,9 @@ pub enum AuditEventType {
     DrtPurchased,
     DrtRedeemed,
     SchemaUploaded,
+    // ── DRT grant lifecycle (new contract) ───────────────────────
+    RightGranted,
+    RightRevoked,
 }
 
 /// A single audit event.

@@ -478,6 +478,10 @@ impl TxDatabase {
     }
 
     /// Delete pool metadata from redb (and owner index).
+    ///
+    /// Currently unused — kept so that an "admin forget pool" endpoint can
+    /// clean up enclave state when the on-chain pool is no longer interesting.
+    #[allow(dead_code)]
     pub fn delete_pool_meta(&self, pool_pda: &str) -> TxDbResult<()> {
         // First, read the owner to clean up the index.
         let owner_wallet_id = {

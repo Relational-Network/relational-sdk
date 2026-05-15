@@ -149,22 +149,27 @@ pub fn wallet_router() -> Router<AppState> {
 /// Build the DRT pool routes (nested under `/v1/drt`).
 pub fn drt_router() -> Router<AppState> {
     Router::new()
-        // ── Pool CRUD ───────────────────────────────────────────
-        .route("/v1/drt/pools", post(pools::create_pool))
+        // ── Atomic create (new contract) ─────────────────────────
+        .route("/v1/drt/pools/malta", post(pools::create_malta_pool))
+        .route("/v1/drt/pools/iob-erp", post(pools::create_iob_erp_pool))
+        // ── Pool info ────────────────────────────────────────────
         .route("/v1/drt/pools/{pool_pda}", get(pools::get_pool))
+        // ── On-chain DRT inspection ──────────────────────────────
         .route(
-            "/v1/drt/pools/by-owner/{owner_pubkey}/{pool_name}",
-            get(pools::get_pool_by_owner),
+            "/v1/drt/pools/{pool_pda}/drt/{drt_name}",
+            get(pools::get_drt),
         )
-        // ── Pool operations ─────────────────────────────────────
-        .route("/v1/drt/pools/{pool_pda}/buy", post(pools::buy_drt))
-        .route("/v1/drt/pools/{pool_pda}/redeem", post(pools::redeem_drt))
-        .route("/v1/drt/pools/{pool_pda}/close", post(pools::close_pool))
-        // ── Balance + events ────────────────────────────────────
+        // ── Admin grant lifecycle ────────────────────────────────
+        .route("/v1/drt/pools/{pool_pda}/grant", post(admin::grant_right))
         .route(
-            "/v1/drt/pools/{pool_pda}/balance/{drt_type}",
-            get(pools::get_drt_balance),
+            "/v1/drt/pools/{pool_pda}/revoke-grant",
+            post(admin::revoke_grant),
         )
+        .route(
+            "/v1/drt/pools/{pool_pda}/grant/{analyst_id}/{drt_name}",
+            get(admin::get_grant_status),
+        )
+        // ── Events ───────────────────────────────────────────────
         .route("/v1/drt/events/{signature}", get(pools::get_tx_events)) // ── Schema upload ────────────────────────────────────────
         .route(
             "/v1/drt/pools/{pool_pda}/schema",

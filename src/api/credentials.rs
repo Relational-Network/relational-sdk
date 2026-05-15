@@ -29,15 +29,16 @@ use uuid::Uuid;
 
 use crate::auth::{AdminToken, UserToken};
 use crate::blockchain::drt::{
-    accounts::{fetch_pool, find_drt_in_pool},
-    instructions::build_redeem_drt,
-    pda::derive_user_ata,
+    accounts::fetch_pool,
+    instructions::build_grant_right,
+    pda::{compute_commitment, derive_drt_config_pda, derive_user_ata},
+    types::APPEND_DRT_NAME,
 };
 use crate::error::ApiError;
 use crate::handlers::{parse_csv_payload, validate_payload};
 use crate::state::AppState;
 use crate::storage::audit::{AuditEvent, AuditEventType, AuditRepository};
-use crate::storage::pool_metadata::{PoolMetadata, PoolState};
+use crate::storage::pool_metadata::{PoolKind, PoolMetadata, PoolState};
 use crate::storage::repository::wallets::WalletRepository;
 
 use super::pools::{load_wallet_keypair, sign_send_and_parse, verify_pool_ownership};
@@ -66,8 +67,8 @@ pub struct IssueCredentialsResponse {
     pub rows_issued: u64,
     /// Transaction signature of the append DRT redemption.
     pub redeem_signature: String,
-    /// Updated total credential count for the pool.
-    pub total_credentials: u64,
+    /// Updated total row count for the pool (count of CSV rows uploaded).
+    pub total_rows: u64,
     /// Solana Explorer URL for the redeem transaction.
     pub explorer_url: String,
 }
@@ -141,7 +142,9 @@ pub struct PoolSummaryResponse {
     pub schema_id: String,
     pub validation_mode: crate::data_validation::ValidationMode,
     pub state: String,
-    pub total_credentials: u64,
+    /// Total CSV rows that have been uploaded into this pool across all
+    /// initialize + issue calls.
+    pub total_rows: u64,
     pub revoked_count: u64,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,9 +161,12 @@ pub struct PoolSummaryResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DrtConfigResponseCompact {
     pub drt_type: String,
+    /// Total tokens minted at registration (the original supply).
     pub supply: u64,
-    pub cost: u64,
-    pub is_minted: bool,
+    /// Tokens still in circulation (i.e. not yet burned/redeemed).
+    /// Best-effort: if the SPL RPC call fails this falls back to `supply`.
+    pub remaining_supply: u64,
+    pub mint: String,
 }
 
 /// Single pool entry in the list response.
@@ -168,7 +174,7 @@ pub struct DrtConfigResponseCompact {
 pub struct PoolListEntry {
     pub pool_pda: String,
     pub pool_name: String,
-    pub total_credentials: u64,
+    pub total_rows: u64,
     pub revoked_count: u64,
     pub schema_id: String,
     pub state: String,
@@ -187,8 +193,10 @@ pub struct PoolsByWalletResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MarketplaceDrtEntry {
     pub drt_type: String,
+    /// Total tokens minted at registration.
     pub supply: u64,
-    pub cost: u64,
+    /// Tokens still in circulation. Best-effort RPC lookup.
+    pub remaining_supply: u64,
 }
 
 /// Pool entry for the marketplace "browse all" listing.
@@ -196,10 +204,11 @@ pub struct MarketplaceDrtEntry {
 pub struct MarketplacePoolEntry {
     pub pool_pda: String,
     pub pool_name: String,
+    pub kind: String,
     pub owner: String,
     pub schema_id: String,
     pub state: String,
-    pub total_credentials: u64,
+    pub total_rows: u64,
     pub revoked_count: u64,
     pub created_at: String,
     pub drt_count: usize,
@@ -338,6 +347,19 @@ fn ensure_pool_dirs(state: &AppState, pool_pda: &str) -> Result<bool, ApiError> 
         .create_dir(&dataset_dir)
         .map_err(|e| ApiError::internal(format!("failed to create pool directory: {e}")))?;
     Ok(true)
+}
+
+/// Decode a 32-char hex string into 16 raw bytes. Used for right_id and pool_uuid.
+pub(crate) fn decode_right_id(hex: &str) -> Result<[u8; 16], ApiError> {
+    if hex.len() != 32 {
+        return Err(ApiError::internal("expected 32-char hex (16 bytes)"));
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .map_err(|_| ApiError::internal("invalid hex in 16-byte id"))?;
+    }
+    Ok(out)
 }
 
 /// Count CSV rows (excluding header).
@@ -554,33 +576,23 @@ pub async fn initialize_pool(
         warn!(pool = %pool_pda_str, "Recovered pool directory structure");
     }
 
-    // Load or create pool metadata.
-    let mut meta = match load_pool_meta(&state, &pool_pda_str) {
-        Ok(m) => m,
-        Err(_) if recovered => {
-            // Bootstrap recovery — create metadata from chain state.
-            PoolMetadata {
-                pool_pda: pool_pda_str.clone(),
-                pool_name: pool.name.clone(),
-                owner_wallet_id: wallet.wallet_id.clone(),
-                owner_pubkey: Some(wallet.public_address.clone()),
-                schema_id: parsed.schema_id.clone(),
-                validation_mode: Default::default(),
-                state: PoolState::NeedsInit,
-                created_onchain_at: Utc::now(),
-                initialized_at: None,
-                last_issue_at: None,
-                total_credentials: 0,
-                revoked_count: 0,
-            }
-        }
-        Err(e) => return Err(e),
-    };
+    // Load pool metadata. Recovery from on-chain state alone is not possible
+    // with the new contract (DRT names + right_ids live only in enclave
+    // metadata) — the create endpoint is the only path that writes them.
+    let mut meta = load_pool_meta(&state, &pool_pda_str)?;
 
     // Verify pool is in `needs_init` state.
     if meta.state != PoolState::NeedsInit {
         return Err(ApiError::bad_request(
             "pool is already initialized — use /issue to add credentials",
+        ));
+    }
+
+    // IOB ERP pools are populated by Jitterbit — uploads via the dashboard
+    // are intentionally rejected.
+    if meta.kind == PoolKind::IobErp {
+        return Err(ApiError::conflict(
+            "IOB ERP pools cannot be initialised via dashboard upload",
         ));
     }
 
@@ -654,6 +666,7 @@ pub async fn initialize_pool(
             "record_id": record_id,
             "row_count": row_count,
             "schema_id": meta.schema_id,
+            "schema_id_claimed_by_uploader": parsed.schema_id,
             "state_transition": "needs_init -> ready"
         }));
     AuditRepository::new(&state.storage)
@@ -711,15 +724,34 @@ pub async fn issue_credentials(
     let pool_pda = Pubkey::from_str(&pool_pda_str)
         .map_err(|_| ApiError::bad_request("invalid pool PDA address"))?;
 
-    // Load pool metadata — must be in Ready state.
+    // Load pool metadata — must be in Ready state, MALTA kind.
     let meta = load_pool_meta(&state, &pool_pda_str)?;
     if meta.state != PoolState::Ready {
         return Err(ApiError::bad_request(
             "pool not initialized — call /initialize first",
         ));
     }
+    if meta.kind == PoolKind::IobErp {
+        return Err(ApiError::conflict(
+            "IOB ERP pools do not accept credential issuance",
+        ));
+    }
 
-    // Load caller's wallet (any admin with append DRTs can issue).
+    // Pull the append DRT's right_id + mint from enclave metadata
+    // (the new contract doesn't carry DRT configs inline on the Pool).
+    let append_meta = meta
+        .drts
+        .get(APPEND_DRT_NAME)
+        .ok_or_else(|| ApiError::internal("pool metadata missing 'append' DRT"))?;
+    let append_right_id = decode_right_id(&append_meta.right_id_hex)?;
+    let append_mint = Pubkey::from_str(&append_meta.mint)
+        .map_err(|_| ApiError::internal("invalid mint pubkey in pool metadata"))?;
+    let (drt_config_pda, _) = derive_drt_config_pda(&pool_pda, &append_right_id);
+
+    // Decode the pool uuid for the commitment hash.
+    let pool_uuid = decode_right_id(&meta.pool_uuid_hex)?;
+
+    // Load caller's wallet (admin only — endpoint is `AdminToken`-gated).
     let caller_wallet = super::get_active_wallet_for_user(&state, &token.sub)?;
     let repo = WalletRepository::new(&state.storage);
     let keypair_bytes = repo.read_keypair(&caller_wallet.wallet_id)?;
@@ -728,16 +760,12 @@ pub async fn issue_credentials(
         &caller_wallet.public_address,
     )?;
 
-    // Fetch on-chain pool for DRT configuration.
+    // Fetch on-chain pool for ownership check.
     let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
+    verify_pool_ownership(&pool, &caller_wallet)?;
 
-    // Find the "append" DRT config in the pool.
-    let append_drt = find_drt_in_pool(&pool, "append")?;
-
-    // Check wallet has ≥1 append DRT.
-    let user_pubkey = Pubkey::from_str(&caller_wallet.public_address)
-        .map_err(|_| ApiError::internal("invalid stored wallet address"))?;
-    let user_ata = derive_user_ata(&user_pubkey, &append_drt.mint);
+    // Check the admin holds ≥1 append DRT.
+    let user_ata = derive_user_ata(&keypair.pubkey(), &append_mint);
     let user_balance = match state
         .solana_client
         .rpc()
@@ -749,7 +777,7 @@ pub async fn issue_credentials(
     };
     if user_balance < 1 {
         return Err(ApiError::bad_request(
-            "insufficient append DRTs — buy more before issuing",
+            "append DRT supply exhausted — pool needs to be re-registered",
         ));
     }
 
@@ -775,9 +803,18 @@ pub async fn issue_credentials(
 
     // ── IRREVERSIBLE OPERATIONS ───────────────────────────────────
 
-    // 1. Redeem (burn) 1 append DRT on-chain.
-    let ix = build_redeem_drt(&pool_pda, &keypair.pubkey(), "append", &append_drt.mint)
-        .map_err(ApiError::internal)?;
+    // 1. Burn 1 append DRT on-chain via grant_right. The commitment is unique
+    //    per upload (record_id || pool_uuid || append_right_id) and the Grant
+    //    PDA serves as a permanent on-chain receipt for the upload event.
+    let record_id = Uuid::new_v4().to_string();
+    let commitment = compute_commitment(&record_id, &pool_uuid, &append_right_id);
+    let ix = build_grant_right(
+        &pool_pda,
+        &drt_config_pda,
+        &append_mint,
+        &keypair.pubkey(),
+        &commitment,
+    );
 
     let (sig_str, _events) =
         match sign_send_and_parse(&state, &keypair, vec![ix], "finalized").await {
@@ -789,7 +826,6 @@ pub async fn issue_credentials(
         };
 
     // 2. Store CSV dataset.
-    let record_id = Uuid::new_v4().to_string();
     let dataset_dir = state.storage.paths().pool_dataset_dir(&pool_pda_str);
     let csv_path = dataset_dir.join(format!("{record_id}.csv"));
     let meta_file_path = dataset_dir.join(format!("{record_id}.meta.json"));
@@ -891,7 +927,7 @@ pub async fn issue_credentials(
         record_id,
         rows_issued: row_count,
         redeem_signature: sig_str,
-        total_credentials: updated_meta.total_credentials,
+        total_rows: updated_meta.total_credentials,
         explorer_url,
     }))
 }
@@ -1167,16 +1203,27 @@ pub async fn pool_summary(
     // Fetch on-chain pool.
     let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
 
-    let drts: Vec<DrtConfigResponseCompact> = pool
-        .drts
-        .iter()
-        .map(|d| DrtConfigResponseCompact {
-            drt_type: d.drt_type.clone(),
+    // Build DRT list from enclave metadata (the new contract doesn't carry
+    // DRT configs inline on the Pool account). We do a best-effort SPL
+    // token-supply RPC for each mint to compute `remaining_supply`. If the
+    // RPC fails for a particular mint we transparently fall back to the
+    // recorded supply so the dashboard always renders something sensible.
+    let mut drts: Vec<DrtConfigResponseCompact> = Vec::with_capacity(meta.drts.len());
+    for (name, d) in meta.drts.iter() {
+        let remaining_supply = match Pubkey::from_str(&d.mint) {
+            Ok(mint_pk) => match state.solana_client.rpc().get_token_supply(&mint_pk).await {
+                Ok(amt) => amt.amount.parse::<u64>().unwrap_or(d.supply),
+                Err(_) => d.supply,
+            },
+            Err(_) => d.supply,
+        };
+        drts.push(DrtConfigResponseCompact {
+            drt_type: name.clone(),
             supply: d.supply,
-            cost: d.cost,
-            is_minted: d.is_minted,
-        })
-        .collect();
+            remaining_supply,
+            mint: d.mint.clone(),
+        });
+    }
 
     // Recent audit events (last 10 for this pool, from redb).
     let recent_events: Vec<AuditEvent> = state
@@ -1196,7 +1243,7 @@ pub async fn pool_summary(
         schema_id: meta.schema_id,
         validation_mode: meta.validation_mode,
         state: state_str.to_string(),
-        total_credentials: meta.total_credentials,
+        total_rows: meta.total_credentials,
         revoked_count: meta.revoked_count,
         created_at: meta.created_onchain_at.to_rfc3339(),
         initialized_at: meta.initialized_at.map(|d| d.to_rfc3339()),
@@ -1258,7 +1305,7 @@ pub async fn list_pools_by_wallet(
             PoolListEntry {
                 pool_pda: meta.pool_pda,
                 pool_name: meta.pool_name,
-                total_credentials: meta.total_credentials,
+                total_rows: meta.total_credentials,
                 revoked_count: meta.revoked_count,
                 schema_id: meta.schema_id,
                 state: state_str.to_string(),
@@ -1333,34 +1380,35 @@ pub async fn list_all_pools(
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Fetch live DRT data from chain (acceptable at ~6 pools).
-        let pool_drts = match fetch_pool(
-            state.solana_client.rpc(),
-            &Pubkey::from_str(&meta.pool_pda).unwrap_or_default(),
-        )
-        .await
-        {
-            Ok(pool) => pool
-                .drts
-                .iter()
-                .map(|d| MarketplaceDrtEntry {
-                    drt_type: d.drt_type.clone(),
-                    supply: d.supply,
-                    cost: d.cost,
-                })
-                .collect::<Vec<_>>(),
-            Err(_) => Vec::new(),
-        };
+        // Build DRT list from enclave metadata (avoids per-pool chain RPC).
+        // For the marketplace listing we report `remaining_supply == supply`
+        // to keep this endpoint cheap; the per-pool summary endpoint hits the
+        // RPC for the live remaining supply.
+        let pool_drts: Vec<MarketplaceDrtEntry> = meta
+            .drts
+            .iter()
+            .map(|(name, d)| MarketplaceDrtEntry {
+                drt_type: name.clone(),
+                supply: d.supply,
+                remaining_supply: d.supply,
+            })
+            .collect();
 
         let drt_count = pool_drts.len();
 
+        let kind_str = match meta.kind {
+            PoolKind::Malta => "malta",
+            PoolKind::IobErp => "iob_erp",
+        }
+        .to_string();
         entries.push(MarketplacePoolEntry {
             pool_pda: meta.pool_pda,
             pool_name: meta.pool_name,
+            kind: kind_str,
             owner,
             schema_id: meta.schema_id,
             state: state_str.to_string(),
-            total_credentials: meta.total_credentials,
+            total_rows: meta.total_credentials,
             revoked_count: meta.revoked_count,
             created_at: meta.created_onchain_at.to_rfc3339(),
             drt_count,
@@ -1374,7 +1422,7 @@ pub async fn list_all_pools(
         "name_asc" => {
             entries.sort_by(|a, b| a.pool_name.to_lowercase().cmp(&b.pool_name.to_lowercase()))
         }
-        "credentials_desc" => entries.sort_by(|a, b| b.total_credentials.cmp(&a.total_credentials)),
+        "credentials_desc" => entries.sort_by(|a, b| b.total_rows.cmp(&a.total_rows)),
         _ => entries.sort_by(|a, b| b.created_at.cmp(&a.created_at)), // created_desc
     }
 

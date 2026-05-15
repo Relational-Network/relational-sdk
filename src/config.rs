@@ -119,7 +119,9 @@ pub const NONCE_PURGE_INTERVAL_SECS: u64 = 900;
 // ============================================================================
 
 /// DRT program ID on Solana (devnet). Hardcoded — change and rebuild to update.
-pub const DRT_PROGRAM_ID_STR: &str = "kG7AyfxRoNKcYWGH8aDR6tCFpLVcETt2kBVaPnQCrnp";
+/// Canonical: `digital_rights_tokens` Anchor program. IDL lives at
+/// `relational-sdk/idl/digital_rights_tokens.json`.
+pub const DRT_PROGRAM_ID_STR: &str = "8N5hVnK81rWhwfhxt9LfjrbeVT83Jjgy4dKyy4q6HKjk";
 
 /// Get the DRT program `Pubkey` (parsed from the hardcoded constant).
 pub fn drt_program_id() -> solana_pubkey::Pubkey {

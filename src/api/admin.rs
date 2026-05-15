@@ -399,3 +399,286 @@ pub async fn log_role_change(
 
     Json(LogRoleChangeResponse { logged: true })
 }
+
+// ============================================================================
+// Grant / revoke a DRT to an analyst (admin-only)
+// ============================================================================
+
+use solana_pubkey::Pubkey;
+use solana_signer::Signer;
+use std::str::FromStr;
+
+use crate::blockchain::drt::{
+    accounts::{fetch_grant, fetch_pool},
+    instructions::{build_grant_right, build_revoke_grant},
+    pda::{compute_commitment, derive_drt_config_pda, derive_grant_pda},
+    types::{GrantResponse, GrantRightRequest, RevokeGrantRequest},
+};
+use crate::storage::pool_metadata::PoolKind;
+
+/// Grant a DRT to an analyst.
+///
+/// Computes `commitment = sha256(analyst_id ‖ pool_uuid ‖ right_id)`, burns 1
+/// admin-held DRT, and writes a `Grant` PDA on-chain. The analyst identity
+/// is never persisted on-chain — only the commitment hash.
+#[utoipa::path(
+    post,
+    path = "/v1/drt/pools/{pool_pda}/grant",
+    tag = "Admin",
+    summary = "Grant DRT to analyst",
+    description = "Admin-only. Burns 1 admin-held DRT and writes a Grant PDA keyed by sha256(analyst_id || pool_uuid || right_id).",
+    security(("bearer_auth" = [])),
+    params(("pool_pda" = String, Path, description = "Pool PDA address (base58)")),
+    request_body = GrantRightRequest,
+    responses(
+        (status = 200, description = "Right granted", body = GrantResponse),
+        (status = 400, description = "Validation error"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not pool owner"),
+        (status = 404, description = "Pool or DRT not found"),
+        (status = 503, description = "RPC unavailable"),
+    )
+)]
+pub async fn grant_right(
+    AdminToken(token): AdminToken,
+    State(state): State<AppState>,
+    axum::extract::Path(pool_pda_str): axum::extract::Path<String>,
+    Json(payload): Json<GrantRightRequest>,
+) -> Result<Json<GrantResponse>, ApiError> {
+    if payload.drt_name.is_empty() {
+        return Err(ApiError::bad_request("drt_name cannot be empty"));
+    }
+    if payload.analyst_id.is_empty() {
+        return Err(ApiError::bad_request("analyst_id cannot be empty"));
+    }
+    let pool_pda = Pubkey::from_str(&pool_pda_str)
+        .map_err(|_| ApiError::bad_request("invalid pool PDA address"))?;
+
+    // Load pool meta and locate the requested DRT.
+    let meta = crate::api::pools::load_pool_meta(&state, &pool_pda_str)?;
+    if meta.kind == PoolKind::IobErp && payload.drt_name == "append" {
+        return Err(ApiError::bad_request(
+            "IOB ERP pools have no 'append' DRT",
+        ));
+    }
+    let drt = meta.drts.get(&payload.drt_name).ok_or_else(|| {
+        ApiError::not_found(format!(
+            "DRT '{}' not found in pool",
+            payload.drt_name
+        ))
+    })?;
+    let right_id = crate::api::credentials::decode_right_id(&drt.right_id_hex)?;
+    let pool_uuid = crate::api::credentials::decode_right_id(&meta.pool_uuid_hex)?;
+    let mint = Pubkey::from_str(&drt.mint)
+        .map_err(|_| ApiError::internal("invalid mint pubkey in pool metadata"))?;
+    let (drt_config_pda, _) = derive_drt_config_pda(&pool_pda, &right_id);
+
+    // Load caller's wallet — must be the pool owner.
+    let repo = crate::storage::repository::wallets::WalletRepository::new(&state.storage);
+    let (wallet, keypair) =
+        crate::api::pools::load_wallet_keypair(&repo, &payload.wallet_id, &token.sub)?;
+    let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
+    crate::api::pools::verify_pool_ownership(&pool, &wallet)?;
+
+    // Build + send.
+    let commitment = compute_commitment(&payload.analyst_id, &pool_uuid, &right_id);
+    let (grant_pda, _) = derive_grant_pda(&commitment);
+    let ix = build_grant_right(&pool_pda, &drt_config_pda, &mint, &keypair.pubkey(), &commitment);
+    let (sig, _events) =
+        crate::api::pools::sign_send_and_parse(&state, &keypair, vec![ix], "finalized").await?;
+
+    let evt = AuditEvent::new(AuditEventType::RightGranted)
+        .with_user(&token.sub)
+        .with_resource("drt_grant", &grant_pda.to_string())
+        .with_pool_pda(&pool_pda_str)
+        .with_details(serde_json::json!({
+            "pool_pda": pool_pda_str,
+            "drt_name": payload.drt_name,
+            "analyst_id_hash": hex::encode(commitment),
+            "grant_pda": grant_pda.to_string(),
+            "tx_signature": sig,
+        }));
+    AuditRepository::new(&state.storage)
+        .with_tx_db(&state.tx_db)
+        .log(&evt)
+        .await;
+
+    info!(
+        signature = %sig,
+        pool = %pool_pda_str,
+        drt = %payload.drt_name,
+        grant = %grant_pda,
+        "Right granted"
+    );
+
+    Ok(Json(GrantResponse {
+        signature: sig.clone(),
+        explorer_url: crate::api::pools::explorer_url(&state, &sig),
+        commitment_hex: hex::encode(commitment),
+        grant_pda: grant_pda.to_string(),
+    }))
+}
+
+/// Live grant-status diagnostic.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GrantStatusResponse {
+    pub pool_pda: String,
+    pub drt_name: String,
+    pub commitment_hex: String,
+    pub grant_pda: String,
+    pub granted: bool,
+    /// Unix timestamp (seconds) the grant was minted, when `granted=true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub granted_at: Option<i64>,
+}
+
+/// Check whether an analyst currently holds a grant for a given DRT.
+///
+/// Computes the same commitment used at grant time and reads the Grant PDA
+/// from chain. Returns `granted: false` if the account does not exist.
+#[utoipa::path(
+    get,
+    path = "/v1/drt/pools/{pool_pda}/grant/{analyst_id}/{drt_name}",
+    tag = "Admin",
+    summary = "Check DRT grant status",
+    description = "Looks up Grant PDA at sha256(analyst_id || pool_uuid || right_id). Returns whether it exists and when it was minted.",
+    security(("bearer_auth" = [])),
+    params(
+        ("pool_pda" = String, Path, description = "Pool PDA address (base58)"),
+        ("analyst_id" = String, Path, description = "Analyst identifier (Clerk sub or similar)"),
+        ("drt_name" = String, Path, description = "DRT name"),
+    ),
+    responses(
+        (status = 200, description = "Grant status", body = GrantStatusResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Pool or DRT not found"),
+        (status = 503, description = "RPC unavailable"),
+    )
+)]
+pub async fn get_grant_status(
+    AdminToken(_token): AdminToken,
+    State(state): State<AppState>,
+    axum::extract::Path((pool_pda_str, analyst_id, drt_name)): axum::extract::Path<(
+        String,
+        String,
+        String,
+    )>,
+) -> Result<Json<GrantStatusResponse>, ApiError> {
+    let pool_pda = Pubkey::from_str(&pool_pda_str)
+        .map_err(|_| ApiError::bad_request("invalid pool PDA address"))?;
+    let meta = crate::api::pools::load_pool_meta(&state, &pool_pda_str)?;
+    let drt = meta
+        .drts
+        .get(&drt_name)
+        .ok_or_else(|| ApiError::not_found(format!("DRT '{drt_name}' not found in pool")))?;
+    let right_id = crate::api::credentials::decode_right_id(&drt.right_id_hex)?;
+    let pool_uuid = crate::api::credentials::decode_right_id(&meta.pool_uuid_hex)?;
+    let commitment = compute_commitment(&analyst_id, &pool_uuid, &right_id);
+    let (grant_pda, _) = derive_grant_pda(&commitment);
+
+    let (granted, granted_at) = match fetch_grant(state.solana_client.rpc(), &grant_pda).await {
+        Ok(g) => (true, Some(g.granted_at)),
+        Err(_) => (false, None),
+    };
+
+    // Suppress unused-import: `pool_pda` is computed for validation/symmetry.
+    let _ = pool_pda;
+
+    Ok(Json(GrantStatusResponse {
+        pool_pda: pool_pda_str,
+        drt_name,
+        commitment_hex: hex::encode(commitment),
+        grant_pda: grant_pda.to_string(),
+        granted,
+        granted_at,
+    }))
+}
+
+/// Revoke a previously granted DRT.
+#[utoipa::path(
+    post,
+    path = "/v1/drt/pools/{pool_pda}/revoke-grant",
+    tag = "Admin",
+    summary = "Revoke DRT grant",
+    description = "Admin-only. Closes the Grant PDA matching sha256(analyst_id || pool_uuid || right_id).",
+    security(("bearer_auth" = [])),
+    params(("pool_pda" = String, Path, description = "Pool PDA address (base58)")),
+    request_body = RevokeGrantRequest,
+    responses(
+        (status = 200, description = "Grant revoked", body = GrantResponse),
+        (status = 400, description = "Validation error"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not pool owner"),
+        (status = 404, description = "Pool, DRT, or grant not found"),
+        (status = 503, description = "RPC unavailable"),
+    )
+)]
+pub async fn revoke_grant(
+    AdminToken(token): AdminToken,
+    State(state): State<AppState>,
+    axum::extract::Path(pool_pda_str): axum::extract::Path<String>,
+    Json(payload): Json<RevokeGrantRequest>,
+) -> Result<Json<GrantResponse>, ApiError> {
+    if payload.drt_name.is_empty() {
+        return Err(ApiError::bad_request("drt_name cannot be empty"));
+    }
+    if payload.analyst_id.is_empty() {
+        return Err(ApiError::bad_request("analyst_id cannot be empty"));
+    }
+    let pool_pda = Pubkey::from_str(&pool_pda_str)
+        .map_err(|_| ApiError::bad_request("invalid pool PDA address"))?;
+
+    let meta = crate::api::pools::load_pool_meta(&state, &pool_pda_str)?;
+    let drt = meta.drts.get(&payload.drt_name).ok_or_else(|| {
+        ApiError::not_found(format!(
+            "DRT '{}' not found in pool",
+            payload.drt_name
+        ))
+    })?;
+    let right_id = crate::api::credentials::decode_right_id(&drt.right_id_hex)?;
+    let pool_uuid = crate::api::credentials::decode_right_id(&meta.pool_uuid_hex)?;
+    let (drt_config_pda, _) = derive_drt_config_pda(&pool_pda, &right_id);
+
+    let repo = crate::storage::repository::wallets::WalletRepository::new(&state.storage);
+    let (wallet, keypair) =
+        crate::api::pools::load_wallet_keypair(&repo, &payload.wallet_id, &token.sub)?;
+    let pool = fetch_pool(state.solana_client.rpc(), &pool_pda).await?;
+    crate::api::pools::verify_pool_ownership(&pool, &wallet)?;
+
+    let commitment = compute_commitment(&payload.analyst_id, &pool_uuid, &right_id);
+    let (grant_pda, _) = derive_grant_pda(&commitment);
+    let ix = build_revoke_grant(&keypair.pubkey(), &pool_pda, &drt_config_pda, &commitment);
+    let (sig, _events) =
+        crate::api::pools::sign_send_and_parse(&state, &keypair, vec![ix], "finalized").await?;
+
+    let evt = AuditEvent::new(AuditEventType::RightRevoked)
+        .with_user(&token.sub)
+        .with_resource("drt_grant", &grant_pda.to_string())
+        .with_pool_pda(&pool_pda_str)
+        .with_details(serde_json::json!({
+            "pool_pda": pool_pda_str,
+            "drt_name": payload.drt_name,
+            "analyst_id_hash": hex::encode(commitment),
+            "grant_pda": grant_pda.to_string(),
+            "tx_signature": sig,
+        }));
+    AuditRepository::new(&state.storage)
+        .with_tx_db(&state.tx_db)
+        .log(&evt)
+        .await;
+
+    info!(
+        signature = %sig,
+        pool = %pool_pda_str,
+        drt = %payload.drt_name,
+        grant = %grant_pda,
+        "Right revoked"
+    );
+
+    Ok(Json(GrantResponse {
+        signature: sig.clone(),
+        explorer_url: crate::api::pools::explorer_url(&state, &sig),
+        commitment_hex: hex::encode(commitment),
+        grant_pda: grant_pda.to_string(),
+    }))
+}
