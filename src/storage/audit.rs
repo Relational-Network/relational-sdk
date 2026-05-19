@@ -46,6 +46,8 @@ pub enum AuditEventType {
     // ── DRT grant lifecycle (new contract) ───────────────────────
     RightGranted,
     RightRevoked,
+    // ── DRT execution (analyst runs a script in the enclave) ─────
+    DrtExecuted,
 }
 
 /// A single audit event.

@@ -299,6 +299,15 @@ pub async fn data_query(
         "Data query requested"
     );
 
+    let result = data_query_inner(&state, &payload).await;
+    record_drt_execution_audit(&state, &token, &payload, &result).await;
+    result.map(Json)
+}
+
+async fn data_query_inner(
+    state: &AppState,
+    payload: &DataQueryRequest,
+) -> Result<DataQueryResponse, ApiError> {
     if payload.drt_name.is_empty() {
         return Err(ApiError::bad_request("drt_name cannot be empty"));
     }
@@ -354,13 +363,66 @@ pub async fn data_query(
     let result_json: serde_json::Value = serde_json::from_slice(&output.body)
         .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&output.body).into()));
 
-    Ok(Json(DataQueryResponse {
-        pool_pda: payload.pool_pda,
-        drt_name: payload.drt_name,
+    Ok(DataQueryResponse {
+        pool_pda: payload.pool_pda.clone(),
+        drt_name: payload.drt_name.clone(),
         code_hash_hex: drt.code_hash_hex.clone(),
         exit_code: output.exit_code,
         result: result_json,
-    }))
+    })
+}
+
+async fn record_drt_execution_audit(
+    state: &AppState,
+    token: &crate::auth::TokenData,
+    payload: &DataQueryRequest,
+    result: &Result<DataQueryResponse, ApiError>,
+) {
+    use crate::storage::audit::{AuditEvent, AuditEventType, AuditRepository};
+
+    let mut details = serde_json::Map::new();
+    details.insert(
+        "pool_pda".to_string(),
+        serde_json::Value::String(payload.pool_pda.clone()),
+    );
+    details.insert(
+        "drt_name".to_string(),
+        serde_json::Value::String(payload.drt_name.clone()),
+    );
+    details.insert("args".to_string(), payload.args.clone());
+
+    let success = match result {
+        Ok(resp) => {
+            details.insert(
+                "code_hash_hex".to_string(),
+                serde_json::Value::String(resp.code_hash_hex.clone()),
+            );
+            details.insert(
+                "exit_code".to_string(),
+                serde_json::Value::Number(resp.exit_code.into()),
+            );
+            resp.exit_code == 0
+        }
+        Err(e) => {
+            details.insert(
+                "error".to_string(),
+                serde_json::Value::String(e.to_string()),
+            );
+            false
+        }
+    };
+
+    let mut evt = AuditEvent::new(AuditEventType::DrtExecuted)
+        .with_user(&token.sub)
+        .with_resource("drt", &payload.drt_name)
+        .with_pool_pda(&payload.pool_pda)
+        .with_details(serde_json::Value::Object(details));
+    evt.success = success;
+
+    AuditRepository::new(&state.storage)
+        .with_tx_db(&state.tx_db)
+        .log(&evt)
+        .await;
 }
 
 fn load_and_concat_pool_csvs(dataset_dir: &std::path::Path) -> Result<String, ApiError> {

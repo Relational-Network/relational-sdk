@@ -54,7 +54,10 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 #[cfg(target_arch = "wasm32")]
 mod bump_alloc {
     use core::alloc::{GlobalAlloc, Layout};
+    use core::arch::wasm32;
     use core::cell::UnsafeCell;
+
+    const PAGE_SIZE: usize = 64 * 1024;
 
     pub struct BumpAlloc {
         offset: UnsafeCell<usize>,
@@ -86,6 +89,19 @@ mod bump_alloc {
             let align = layout.align();
             let aligned = (cur + align - 1) & !(align - 1);
             let next = aligned + layout.size();
+
+            // Grow linear memory if the allocation would run past the current
+            // bound. Without this, reading a large CSV (>1 page after static
+            // data) traps with "out of bounds memory access".
+            let current_bytes = wasm32::memory_size(0) * PAGE_SIZE;
+            if next > current_bytes {
+                let needed = next - current_bytes;
+                let pages = (needed + PAGE_SIZE - 1) / PAGE_SIZE;
+                if wasm32::memory_grow(0, pages) == usize::MAX {
+                    return core::ptr::null_mut();
+                }
+            }
+
             *off_ptr = next;
             aligned as *mut u8
         }

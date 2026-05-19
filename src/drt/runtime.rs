@@ -44,13 +44,20 @@ use wasmi::{Caller, Config, Engine, Extern, Linker, Memory, Module, Store};
 pub const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 
 /// Maximum bytes of the input blob the host passes to the script.
-pub const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024; // 64 MiB (CSV-bound)
+///
+/// CSV-bound. The blob is `{"csv": "...", "args": {...}}` so this also has to
+/// cover JSON wrapping + escape overhead. With a bump allocator inside the
+/// WASM module that never frees, a 500 MiB CSV ends up costing roughly 2× this
+/// in WASM linear memory (raw bytes + parsed string copy); wasm32's hard cap
+/// is 4 GiB, so don't push this past ~1.5 GiB.
+pub const MAX_INPUT_BYTES: usize = 600 * 1024 * 1024; // 600 MiB
 
-/// Fuel budget (`wasmi` "instructions"). Roughly 1 sec on modest hardware.
-pub const DEFAULT_FUEL: u64 = 50_000_000;
+/// Fuel budget (`wasmi` "instructions"). Sized so the wall-clock cap below
+/// fires first for realistic workloads — fuel is defence in depth.
+pub const DEFAULT_FUEL: u64 = 10_000_000_000;
 
 /// Hard wall-clock cap, defence in depth on top of fuel.
-pub const DEFAULT_WALL_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_WALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Input blob the host stages for the DRT.
 #[derive(Debug, Serialize)]
