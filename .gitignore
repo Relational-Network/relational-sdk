@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Relational Network
 
 /target
+drt-examples/mean/target
 
 # Ignore Gramine SGX artifacts
 relational-sdk.sig

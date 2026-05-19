@@ -462,6 +462,18 @@ pub async fn grant_right(
     let drt = meta.drts.get(&payload.drt_name).ok_or_else(|| {
         ApiError::not_found(format!("DRT '{}' not found in pool", payload.drt_name))
     })?;
+
+    // Verify the DRT script before any on-chain side effects.
+    // The `append` DRT has no executable code (empty URL, zero hash) — skip it.
+    if !drt.code_repo_url.is_empty() {
+        crate::drt::verified_fetch::fetch_and_verify(
+            &drt.code_repo_url,
+            &drt.code_hash_hex,
+            &state.storage,
+        )
+        .await?;
+    }
+
     let right_id = crate::api::credentials::decode_right_id(&drt.right_id_hex)?;
     let pool_uuid = crate::api::credentials::decode_right_id(&meta.pool_uuid_hex)?;
     let mint = Pubkey::from_str(&drt.mint)

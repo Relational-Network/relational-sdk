@@ -18,7 +18,7 @@ use tracing::{debug, info};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::auth::{AdminToken, ReadOnlyToken, UserToken};
+use crate::auth::{AdminToken, AnalystToken, UserToken};
 use crate::config::MAX_BODY_SIZE;
 use crate::crypto::{enclave_key, Jwk};
 use crate::data_validation::{
@@ -102,17 +102,12 @@ pub async fn admin_status(AdminToken(token): AdminToken) -> Json<AdminStatusResp
 
 #[derive(Debug, Default)]
 pub(crate) struct MultipartCsvInput {
-    pub schema_id: Option<String>,
-    pub file: Option<Vec<u8>>,
     pub encrypted_data: Option<String>,
     pub ephemeral_public_key: Option<String>,
     pub nonce: Option<String>,
-    /// Optional wallet_id field (used by pool-scoped endpoints like `/initialize`, `/issue`).
-    pub wallet_id: Option<String>,
 }
 
 pub(crate) struct ParsedCsvPayload {
-    pub schema_id: String,
     pub csv_bytes: Vec<u8>,
 }
 
@@ -230,40 +225,182 @@ pub async fn data_upload(
     }))
 }
 
-/// Response for data query.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DataQueryResponse {
-    pub results: Vec<String>,
-    pub user: String,
+/// Request body for `/v1/data/query`.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DataQueryRequest {
+    /// Pool PDA (base58) the DRT script reads from.
+    pub pool_pda: String,
+    /// Name of the DRT to invoke — must be present in the pool's `drts` map.
+    pub drt_name: String,
+    /// Free-form arguments forwarded to the DRT as the `args` JSON field.
+    #[serde(default)]
+    pub args: serde_json::Value,
 }
 
-/// Query data from the enclave.
+/// Response for `/v1/data/query`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DataQueryResponse {
+    /// Pool PDA the script ran against.
+    pub pool_pda: String,
+    /// DRT name that was invoked.
+    pub drt_name: String,
+    /// SHA-256 of the script that ran (matches on-chain `code_hash`).
+    pub code_hash_hex: String,
+    /// `run()` exit code from the WASM module. 0 = success.
+    pub exit_code: i32,
+    /// Script-emitted result as JSON.
+    pub result: serde_json::Value,
+}
+
+/// Execute a DRT script against a pool inside the enclave.
 ///
-/// Requires at least read_only role.
+/// Pipeline:
+///
+/// 1. Look up the pool and DRT metadata.
+/// 2. Re-verify the script against the on-chain (mirrored) `code_hash`,
+///    fetching from GitHub if not cached. Any mismatch fails the call.
+/// 3. Read the pool's CSV datasets and concatenate them.
+/// 4. Apply the row-level employer-group filter derived from the caller's
+///    Entra claim. (Placeholder today — Entra plumb-through is Phase 2.5
+///    backlog; for now the filter is a no-op and a TODO is emitted in logs.)
+/// 5. Hand `{ csv, args }` to the wasmi sandbox; cap fuel + wall-clock + memory.
+/// 6. Return whatever the script wrote — typically a small JSON blob.
+///
+/// Authorization: requires the analyst role. The `analyst_id` recorded in
+/// the on-chain grant must match `token.sub` (verified by `commitment_hex`)
+/// — TODO once the grant scan helper is wired (D3 backend).
 #[utoipa::path(
-    get,
+    post,
     path = "/v1/data/query",
     tag = "Data",
-    summary = "Query data",
-    description = "Query data from the enclave. Requires read_only, user, or admin role.",
+    summary = "Run a DRT script against a pool",
+    description = "Analyst-only. Fetches and verifies the DRT script, loads pool data, executes \
+                   the script inside the WASM sandbox, and returns the result.",
     security(("bearer_auth" = [])),
+    request_body = DataQueryRequest,
     responses(
-        (status = 200, description = "Query results", body = DataQueryResponse),
+        (status = 200, description = "Query result", body = DataQueryResponse),
+        (status = 400, description = "Bad request / hash mismatch / script trap"),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Forbidden - read_only role required")
+        (status = 403, description = "Forbidden - analyst role required"),
+        (status = 404, description = "Pool or DRT not found"),
     )
 )]
-pub async fn data_query(ReadOnlyToken(token): ReadOnlyToken) -> Json<DataQueryResponse> {
-    info!(sub = %token.sub, role = %token.role, "Data query requested");
-    // TODO: Implement secure query execution:
-    // 1. Parse query parameters (add query params to endpoint if needed)
-    // 2. Execute query against enclave-protected data store
-    // 3. Optionally encrypt results for the requesting user
-    // 4. Return results with pagination if needed
-    Json(DataQueryResponse {
-        results: vec!["sample_result".to_string()],
-        user: token.sub,
-    })
+pub async fn data_query(
+    AnalystToken(token): AnalystToken,
+    State(state): State<AppState>,
+    Json(payload): Json<DataQueryRequest>,
+) -> Result<Json<DataQueryResponse>, ApiError> {
+    info!(
+        sub = %token.sub,
+        role = %token.role,
+        pool = %payload.pool_pda,
+        drt = %payload.drt_name,
+        "Data query requested"
+    );
+
+    if payload.drt_name.is_empty() {
+        return Err(ApiError::bad_request("drt_name cannot be empty"));
+    }
+
+    // 1. Pool + DRT lookup.
+    let meta_path = state.storage.paths().pool_meta(&payload.pool_pda);
+    let meta = state
+        .storage
+        .read_json::<crate::storage::pool_metadata::PoolMetadata>(&meta_path)
+        .map_err(|_| ApiError::not_found(format!("pool {} not found", payload.pool_pda)))?;
+
+    let drt = meta
+        .drts
+        .get(&payload.drt_name)
+        .ok_or_else(|| ApiError::not_found(format!("DRT '{}' not in pool", payload.drt_name)))?;
+
+    if drt.code_repo_url.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "DRT '{}' has no executable script (append-only)",
+            payload.drt_name
+        )));
+    }
+
+    // 2. Fetch + SHA-256 verify against on-chain hash (cached + re-checked).
+    let wasm_bytes = crate::drt::verified_fetch::fetch_and_verify(
+        &drt.code_repo_url,
+        &drt.code_hash_hex,
+        &state.storage,
+    )
+    .await?;
+
+    // 3. Load pool CSVs. For the pilot we concatenate every `*.csv` in the
+    // pool's dataset dir; the schema is identical across files (initial.csv +
+    // append snapshots), so a single CSV header followed by all body rows is
+    // safe.
+    let dataset_dir = state.storage.paths().pool_dataset_dir(&payload.pool_pda);
+    let csv = load_and_concat_pool_csvs(&dataset_dir)?;
+
+    // 4. TODO(phase-2.5): apply row-level employer_group filter from
+    // `token.employer_group` once the AVS embeds the Entra group claim.
+    if csv.is_empty() {
+        return Err(ApiError::bad_request("pool has no data uploaded yet"));
+    }
+
+    // 5. Sandboxed execution.
+    let runtime_input = crate::drt::runtime::RuntimeInput {
+        csv: &csv,
+        args: &payload.args,
+    };
+    let output = crate::drt::runtime::execute(wasm_bytes, runtime_input).await?;
+
+    // 6. Try to parse the body as JSON; fall back to a string blob otherwise.
+    let result_json: serde_json::Value = serde_json::from_slice(&output.body)
+        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&output.body).into()));
+
+    Ok(Json(DataQueryResponse {
+        pool_pda: payload.pool_pda,
+        drt_name: payload.drt_name,
+        code_hash_hex: drt.code_hash_hex.clone(),
+        exit_code: output.exit_code,
+        result: result_json,
+    }))
+}
+
+fn load_and_concat_pool_csvs(dataset_dir: &std::path::Path) -> Result<String, ApiError> {
+    use std::io::Read;
+    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dataset_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("csv"))
+            .collect(),
+        Err(_) => return Ok(String::new()),
+    };
+    entries.sort();
+
+    let mut out = String::new();
+    let mut header_emitted = false;
+    for path in entries {
+        let mut file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let mut buf = String::new();
+        if file.read_to_string(&mut buf).is_err() {
+            continue;
+        }
+        let mut lines = buf.lines();
+        let Some(header) = lines.next() else { continue };
+        if !header_emitted {
+            out.push_str(header);
+            out.push('\n');
+            header_emitted = true;
+        }
+        for line in lines {
+            if line.is_empty() {
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    Ok(out)
 }
 
 /// Validate a CSV payload against the pool's stored schema.
@@ -291,37 +428,43 @@ pub(crate) fn validate_payload(
 
 pub(crate) async fn parse_csv_payload(multipart: Multipart) -> Result<ParsedCsvPayload, ApiError> {
     let input = parse_multipart_fields(multipart).await?;
-    let schema_id = input
-        .schema_id
-        .ok_or_else(|| ApiError::bad_request("schema_id is required"))?;
-
-    // Only encrypted uploads are accepted — plaintext file uploads are rejected.
-    if input.file.is_some() {
-        return Err(ApiError::bad_request(
-            "plaintext file uploads are not accepted — use encrypted_data with ephemeral_public_key and nonce",
-        ));
-    }
-
-    let encrypted_data = input
-        .encrypted_data
-        .ok_or_else(|| ApiError::bad_request("missing encrypted_data field"))?;
-
-    let ephemeral_key = input.ephemeral_public_key.ok_or_else(|| {
-        ApiError::bad_request("ephemeral_public_key is required for encrypted uploads")
-    })?;
-    let nonce = input
-        .nonce
-        .ok_or_else(|| ApiError::bad_request("nonce is required for encrypted uploads"))?;
+    let (encrypted_data, ephemeral_key, nonce) = input.encrypted_parts()?;
 
     let csv_bytes = crate::crypto::decrypt_ecdh_payload(&encrypted_data, &ephemeral_key, &nonce)
         .map_err(ApiError::bad_request)?;
 
     ensure_size_limit(&csv_bytes)?;
 
-    Ok(ParsedCsvPayload {
-        schema_id,
-        csv_bytes,
-    })
+    Ok(ParsedCsvPayload { csv_bytes })
+}
+
+impl MultipartCsvInput {
+    fn encrypted_parts(self) -> Result<(String, String, String), ApiError> {
+        let encrypted_data = self
+            .encrypted_data
+            .ok_or_else(|| ApiError::bad_request("missing encrypted_data field"))?;
+
+        let ephemeral_key = self.ephemeral_public_key.ok_or_else(|| {
+            ApiError::bad_request("ephemeral_public_key is required for encrypted uploads")
+        })?;
+        let nonce = self
+            .nonce
+            .ok_or_else(|| ApiError::bad_request("nonce is required for encrypted uploads"))?;
+
+        Ok((encrypted_data, ephemeral_key, nonce))
+    }
+}
+
+fn validate_csv_multipart_field_name(name: &str) -> Result<(), ApiError> {
+    match name {
+        "encrypted_data" | "ephemeral_public_key" | "nonce" => Ok(()),
+        "file" => Err(ApiError::bad_request(
+            "plaintext file uploads are not accepted — use encrypted_data with ephemeral_public_key and nonce",
+        )),
+        other => Err(ApiError::bad_request(format!(
+            "unsupported multipart field: {other}"
+        ))),
+    }
 }
 
 pub(crate) async fn parse_multipart_fields(
@@ -336,24 +479,9 @@ pub(crate) async fn parse_multipart_fields(
         let Some(name) = field.name().map(str::to_owned) else {
             continue;
         };
+        validate_csv_multipart_field_name(&name)?;
 
         match name.as_str() {
-            "file" => {
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|_| ApiError::bad_request("failed to read file part"))?;
-                input.file = Some(bytes.to_vec());
-            }
-            "schema_id" => {
-                let value = field
-                    .text()
-                    .await
-                    .map_err(|_| ApiError::bad_request("invalid schema_id field"))?;
-                if !value.trim().is_empty() {
-                    input.schema_id = Some(value.trim().to_string());
-                }
-            }
             "encrypted_data" => {
                 let value = field
                     .text()
@@ -381,16 +509,7 @@ pub(crate) async fn parse_multipart_fields(
                     input.nonce = Some(value.trim().to_string());
                 }
             }
-            "wallet_id" => {
-                let value = field
-                    .text()
-                    .await
-                    .map_err(|_| ApiError::bad_request("invalid wallet_id field"))?;
-                if !value.trim().is_empty() {
-                    input.wallet_id = Some(value.trim().to_string());
-                }
-            }
-            _ => {}
+            _ => unreachable!("validated unsupported multipart field"),
         }
     }
     Ok(input)
@@ -404,4 +523,49 @@ pub(crate) fn ensure_size_limit(bytes: &[u8]) -> Result<(), ApiError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encrypted_upload_parts_do_not_require_schema_id() {
+        let input = MultipartCsvInput {
+            encrypted_data: Some("ciphertext".to_string()),
+            ephemeral_public_key: Some("ephemeral-key".to_string()),
+            nonce: Some("nonce".to_string()),
+        };
+
+        let parts = input.encrypted_parts();
+        assert!(parts.is_ok());
+    }
+
+    #[test]
+    fn encrypted_upload_parts_require_encrypted_fields() {
+        let input = MultipartCsvInput {
+            encrypted_data: Some("ciphertext".to_string()),
+            ephemeral_public_key: None,
+            nonce: Some("nonce".to_string()),
+        };
+
+        assert!(input.encrypted_parts().is_err());
+    }
+
+    #[test]
+    fn credential_upload_rejects_schema_id_field() {
+        assert!(validate_csv_multipart_field_name("schema_id").is_err());
+    }
+
+    #[test]
+    fn credential_upload_rejects_plaintext_file_field() {
+        assert!(validate_csv_multipart_field_name("file").is_err());
+    }
+
+    #[test]
+    fn credential_upload_accepts_encrypted_fields() {
+        assert!(validate_csv_multipart_field_name("encrypted_data").is_ok());
+        assert!(validate_csv_multipart_field_name("ephemeral_public_key").is_ok());
+        assert!(validate_csv_multipart_field_name("nonce").is_ok());
+    }
 }

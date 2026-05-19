@@ -87,3 +87,9 @@ redb = { version = "3.1", default-features = false }
 # ── In-process cache ──────────────────────────────────────────────
 lru = { version = "0.16", default-features = false }
 dashmap = { version = "6", default-features = false }
+
+# ── WASM runtime for DRT script execution ─────────────────────────
+# Pure-Rust interpreter — no JIT, no mmap with PROT_EXEC, safe inside
+# SGX/Gramine. wasmtime would be faster but its JIT requires writable+
+# executable pages that Gramine restricts.
+wasmi = { version = "0.50", default-features = false, features = ["std"] }
