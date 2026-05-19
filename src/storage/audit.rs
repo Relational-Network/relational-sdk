@@ -209,44 +209,49 @@ impl<'a> AuditRepository<'a> {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
 
-        // Compute HMAC over the canonical JSON (without hmac field).
+        // Compute the HMAC tag once over the canonical (hmac-less) JSON,
+        // then write the **signed** event to both stores so the redb copy
+        // also carries the tag — list_audit_by_resource returns whatever
+        // bytes redb holds.
         let mut canonical = event.clone();
         canonical.hmac = None;
-        match serde_json::to_string(&canonical) {
+        let signed = match serde_json::to_string(&canonical) {
             Ok(canonical_json) => {
-                let tag = compute_hmac(canonical_json.as_bytes());
                 let mut signed = event.clone();
-                signed.hmac = Some(tag);
-                match serde_json::to_string(&signed) {
-                    Ok(mut line) => {
-                        line.push('\n');
-                        match tokio::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&path)
-                            .await
-                        {
-                            Ok(mut f) => {
-                                if let Err(e) = f.write_all(line.as_bytes()).await {
-                                    warn!(error = %e, path = %path.display(), "Failed to write audit event");
-                                }
-                            }
-                            Err(e) => {
-                                warn!(error = %e, path = %path.display(), "Failed to open audit log file");
-                            }
-                        }
-                    }
-                    Err(e) => warn!(error = %e, "Failed to serialize signed audit event"),
-                }
+                signed.hmac = Some(compute_hmac(canonical_json.as_bytes()));
+                signed
             }
             Err(e) => {
                 warn!(error = %e, "Failed to serialize audit event for HMAC");
+                return;
             }
+        };
+
+        match serde_json::to_string(&signed) {
+            Ok(mut line) => {
+                line.push('\n');
+                match tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .await
+                {
+                    Ok(mut f) => {
+                        if let Err(e) = f.write_all(line.as_bytes()).await {
+                            warn!(error = %e, path = %path.display(), "Failed to write audit event");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, path = %path.display(), "Failed to open audit log file");
+                    }
+                }
+            }
+            Err(e) => warn!(error = %e, "Failed to serialize signed audit event"),
         }
 
-        // Dual-write: persist to redb audit tables (if tx_db attached).
+        // Dual-write: persist the signed event to redb audit tables.
         if let Some(tx_db) = self.tx_db {
-            if let Err(e) = tx_db.log_audit_event(event) {
+            if let Err(e) = tx_db.log_audit_event(&signed) {
                 warn!(error = %e, event_id = %event.event_id, "Failed to write audit event to redb");
             }
         }
