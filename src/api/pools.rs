@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use tracing::{info, warn};
 
-use crate::auth::{AdminToken, UserToken};
+use crate::auth::AdminToken;
 use crate::blockchain::drt::{
     accounts::{fetch_drt_config, fetch_pool},
     events::{parse_events_from_signature, parse_events_from_signature_with_commitment, DrtEvent},
@@ -574,7 +574,7 @@ pub async fn create_iob_erp_pool(
     )
 )]
 pub async fn get_pool(
-    UserToken(_token): UserToken,
+    crate::auth::AnalystToken(_token): crate::auth::AnalystToken,
     State(state): State<AppState>,
     Path(pool_pda_str): Path<String>,
 ) -> Result<Json<PoolInfoResponse>, ApiError> {
@@ -649,7 +649,7 @@ pub async fn get_pool(
     )
 )]
 pub async fn get_drt(
-    UserToken(_token): UserToken,
+    crate::auth::AnalystToken(_token): crate::auth::AnalystToken,
     State(state): State<AppState>,
     Path((pool_pda_str, drt_name)): Path<(String, String)>,
 ) -> Result<Json<DrtConfigResponse>, ApiError> {
@@ -698,7 +698,7 @@ pub async fn get_drt(
     )
 )]
 pub async fn get_tx_events(
-    UserToken(_token): UserToken,
+    crate::auth::AnalystToken(_token): crate::auth::AnalystToken,
     State(state): State<AppState>,
     Path(signature): Path<String>,
 ) -> Result<Json<TxEventsResponse>, ApiError> {

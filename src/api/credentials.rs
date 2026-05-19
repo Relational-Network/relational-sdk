@@ -27,7 +27,7 @@ use tracing::{info, warn};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::auth::{AdminToken, UserToken};
+use crate::auth::AdminToken;
 use crate::blockchain::drt::{
     accounts::fetch_pool,
     instructions::build_grant_right,
@@ -550,7 +550,7 @@ pub struct GetSchemaResponse {
     )
 )]
 pub async fn get_schema(
-    UserToken(_token): UserToken,
+    crate::auth::AnalystToken(_token): crate::auth::AnalystToken,
     State(state): State<AppState>,
     Path(pool_pda_str): Path<String>,
 ) -> Result<Json<GetSchemaResponse>, ApiError> {
@@ -1348,7 +1348,7 @@ pub async fn pool_audit(
     )
 )]
 pub async fn pool_summary(
-    crate::auth::UserToken(_token): crate::auth::UserToken,
+    crate::auth::AnalystToken(_token): crate::auth::AnalystToken,
     State(state): State<AppState>,
     Path(pool_pda_str): Path<String>,
 ) -> Result<Json<PoolSummaryResponse>, ApiError> {
