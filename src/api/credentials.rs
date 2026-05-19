@@ -40,6 +40,7 @@ use crate::state::AppState;
 use crate::storage::audit::{AuditEvent, AuditEventType, AuditRepository};
 use crate::storage::pool_metadata::{PoolKind, PoolMetadata, PoolState};
 use crate::storage::repository::wallets::WalletRepository;
+use sha2::{Digest, Sha256};
 
 use super::pools::{load_wallet_keypair, sign_send_and_parse, verify_pool_ownership};
 
@@ -289,7 +290,10 @@ pub struct UploadSchemaResponse {
     pub field_count: usize,
 }
 
-/// Metadata for a stored credential dataset file.
+/// Queryable issuance metadata. Persisted **only to redb** (`ISSUANCE_RECORDS`);
+/// surfaced by `get_issuance_log`. The on-disk CSV has a separate slim sidecar
+/// (`DatasetAnchor`) so that the encrypted-FS file can be tamper-checked without
+/// loading the redb store.
 #[derive(Debug, Serialize, Deserialize)]
 struct DatasetFileMeta {
     record_id: String,
@@ -298,6 +302,28 @@ struct DatasetFileMeta {
     uploaded_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     redeem_tx_signature: Option<String>,
+}
+
+/// Slim on-disk sidecar for a `{record_id}.csv` file.
+///
+/// Contains only the fields needed to (a) verify the encrypted CSV blob has not
+/// been swapped or truncated by the host, and (b) tie the file back to its
+/// on-chain `RightGranted` event. All queryable fields (uploader, row count,
+/// timestamp) live in redb under `ISSUANCE_RECORDS`.
+#[derive(Debug, Serialize, Deserialize)]
+struct DatasetAnchor {
+    /// `record_id` (matches the CSV filename stem).
+    record_id: String,
+    /// SHA-256 of the raw CSV bytes, hex-encoded.
+    sha256: String,
+    /// Hex-encoded 32-byte grant commitment from `grant_right`.
+    /// `None` for the `initial` upload (no DRT burned).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commitment: Option<String>,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 // ============================================================================
@@ -630,10 +656,15 @@ pub async fn initialize_pool(
         uploaded_at: Utc::now().to_rfc3339(),
         redeem_tx_signature: None,
     };
+    let anchor = DatasetAnchor {
+        record_id: record_id.clone(),
+        sha256: sha256_hex(&parsed.csv_bytes),
+        commitment: None,
+    };
     state
         .storage
-        .write_json(&meta_file_path, &file_meta)
-        .map_err(|e| ApiError::internal(format!("failed to write dataset metadata: {e}")))?;
+        .write_json(&meta_file_path, &anchor)
+        .map_err(|e| ApiError::internal(format!("failed to write dataset anchor: {e}")))?;
 
     // Update pool metadata.
     meta.state = PoolState::Ready;
@@ -666,7 +697,6 @@ pub async fn initialize_pool(
             "record_id": record_id,
             "row_count": row_count,
             "schema_id": meta.schema_id,
-            "schema_id_claimed_by_uploader": parsed.schema_id,
             "state_transition": "needs_init -> ready"
         }));
     AuditRepository::new(&state.storage)
@@ -877,13 +907,19 @@ pub async fn issue_credentials(
         uploaded_at: Utc::now().to_rfc3339(),
         redeem_tx_signature: Some(sig_str.clone()),
     };
-    // Best-effort metadata write.
-    if let Err(e) = state.storage.write_json(&meta_file_path, &file_meta) {
+    let anchor = DatasetAnchor {
+        record_id: record_id.clone(),
+        sha256: sha256_hex(&parsed.csv_bytes),
+        commitment: Some(hex::encode(commitment)),
+    };
+    // Best-effort anchor write — the redb dual-write below is authoritative
+    // for queryable fields; the sidecar is a tamper-evidence anchor only.
+    if let Err(e) = state.storage.write_json(&meta_file_path, &anchor) {
         warn!(
             pool = %pool_pda_str,
             record_id = %record_id,
             error = %e,
-            "Failed to write dataset file metadata"
+            "Failed to write dataset anchor"
         );
     }
 
