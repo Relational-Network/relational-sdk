@@ -120,6 +120,23 @@ pub struct PoolAuditQuery {
     /// Offset for pagination (default: 0).
     #[serde(default)]
     pub offset: usize,
+    /// Filter to events of this type (snake_case, e.g. `right_granted`).
+    /// Repeatable via comma-separated values (e.g. `right_granted,right_revoked`).
+    #[serde(default)]
+    pub event_type: Option<String>,
+    /// Filter to events with `user_id` equal to this (exact match).
+    #[serde(default)]
+    pub actor: Option<String>,
+    /// Filter to `success=true` (`ok`) or `success=false` (`failed`).
+    /// Anything else (empty / missing) returns both.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Inclusive RFC-3339 lower bound on `timestamp`.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Inclusive RFC-3339 upper bound on `timestamp`.
+    #[serde(default)]
+    pub to: Option<String>,
 }
 
 fn default_limit() -> usize {
@@ -1206,28 +1223,109 @@ pub async fn list_revocations(
     )
 )]
 pub async fn pool_audit(
-    AdminToken(_token): AdminToken,
+    crate::auth::AnalystToken(_token): crate::auth::AnalystToken,
     State(state): State<AppState>,
     Path(pool_pda_str): Path<String>,
     Query(query): Query<PoolAuditQuery>,
 ) -> Result<Json<PoolAuditResponse>, ApiError> {
     // Any admin can view audit events (no ownership check).
 
-    // Query audit events from redb (indexed by resource_id = pool_pda).
     let limit = query.limit.min(200);
-    let all_events = state
+    let has_filters = query.event_type.is_some()
+        || query.actor.is_some()
+        || query.status.is_some()
+        || query.from.is_some()
+        || query.to.is_some();
+
+    // If filters are present, over-fetch from redb and post-filter — the
+    // per-pool volume is small (hundreds at pilot scale). If no filters,
+    // the original limit/offset path through redb is faithful.
+    let fetch_limit = if has_filters { 1_000 } else { limit };
+    let fetch_offset = if has_filters { 0 } else { query.offset };
+
+    let raw_events = state
         .tx_db
-        .list_audit_by_resource(&pool_pda_str, limit, query.offset)
+        .list_audit_by_resource(&pool_pda_str, fetch_limit, fetch_offset)
         .map_err(|e| ApiError::internal(format!("failed to query audit events: {e}")))?;
 
-    let total = state
-        .tx_db
-        .count_audit_by_resource(&pool_pda_str)
-        .unwrap_or(0);
+    let event_type_filter: Option<Vec<String>> = query.event_type.as_ref().map(|s| {
+        s.split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect()
+    });
+
+    let from_ts = query
+        .from
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc));
+    let to_ts = query
+        .to
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc));
+
+    let filtered: Vec<AuditEvent> = raw_events
+        .into_iter()
+        .filter(|e| {
+            if let Some(types) = &event_type_filter {
+                let kind = serde_json::to_value(&e.event_type)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                if !types.iter().any(|t| t == &kind) {
+                    return false;
+                }
+            }
+            if let Some(actor) = query.actor.as_deref() {
+                if e.user_id.as_deref() != Some(actor) {
+                    return false;
+                }
+            }
+            if let Some(status) = query.status.as_deref() {
+                match status {
+                    "ok" | "success" if !e.success => return false,
+                    "failed" | "error" if e.success => return false,
+                    _ => {}
+                }
+            }
+            if let Some(from) = from_ts {
+                if e.timestamp < from {
+                    return false;
+                }
+            }
+            if let Some(to) = to_ts {
+                if e.timestamp > to {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    let total_filtered = filtered.len();
+    let page: Vec<AuditEvent> = if has_filters {
+        filtered.into_iter().skip(query.offset).take(limit).collect()
+    } else {
+        filtered
+    };
+
+    // When no filters are active the redb count is the authoritative total;
+    // with filters we report the count of matching rows we scanned (capped
+    // at fetch_limit).
+    let total = if has_filters {
+        total_filtered
+    } else {
+        state
+            .tx_db
+            .count_audit_by_resource(&pool_pda_str)
+            .unwrap_or(0)
+    };
 
     Ok(Json(PoolAuditResponse {
         pool_pda: pool_pda_str,
-        events: all_events,
+        events: page,
         total,
     }))
 }
