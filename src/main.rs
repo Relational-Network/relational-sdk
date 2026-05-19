@@ -30,6 +30,7 @@ mod blockchain;
 mod config;
 mod crypto;
 mod data_validation;
+mod drt;
 mod error;
 mod handlers;
 mod health;
@@ -63,8 +64,8 @@ use config::{
 // The enclave only listens on localhost; browsers never connect directly.
 use crypto::enclave_key;
 use handlers::{
-    admin_status, data_query, data_upload, get_public_key, AdminStatusResponse, DataQueryResponse,
-    DataUploadRequest, DataUploadResponse,
+    admin_status, data_query, data_upload, get_public_key, AdminStatusResponse, DataQueryRequest,
+    DataQueryResponse, DataUploadRequest, DataUploadResponse,
 };
 use health::{health, liveness, readiness, HealthChecks, HealthResponse, ReadyResponse};
 use state::AppState;
@@ -171,6 +172,7 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         AdminStatusResponse,
         DataUploadRequest,
         DataUploadResponse,
+        DataQueryRequest,
         DataQueryResponse,
         data_validation::ValidationError,
         data_validation::ValidationMode,
@@ -433,7 +435,7 @@ async fn main() {
     }
 
     // Build the router with all endpoints.
-    // Body limit: 20MB max for upload endpoints, prevents unbounded memory usage.
+    // Body limit: 50MB max for upload endpoints, prevents unbounded memory usage.
     let app = Router::new()
         // Health endpoints (unversioned for k8s probes).
         .route("/health", get(health))
@@ -443,7 +445,7 @@ async fn main() {
         .route("/v1/attestation/public-key", get(get_public_key))
         .route("/v1/admin/status", get(admin_status))
         .route("/v1/data/upload", post(data_upload))
-        .route("/v1/data/query", get(data_query))
+        .route("/v1/data/query", post(data_query))
         .route("/api-doc/openapi.json", get(openapi_json))
         // Wallet service routes.
         .merge(api::wallet_router())

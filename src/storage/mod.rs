@@ -18,8 +18,9 @@
 //! │   ├── pool.meta.json
 //! │   ├── dataset/
 //! │   │   ├── initial.csv
+//! │   │   ├── initial.meta.json     # DatasetAnchor: sha256 + record_id
 //! │   │   ├── {uuid}.csv
-//! │   │   └── {uuid}.meta.json
+//! │   │   └── {uuid}.meta.json      # DatasetAnchor: sha256 + commitment + record_id
 //! │   └── revocations.jsonl
 //! ├── audit/
 //! │   └── 2026-02-24.jsonl
