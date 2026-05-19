@@ -20,10 +20,11 @@ use tracing::info;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::audit_log;
-use crate::auth::AdminToken;
+use crate::auth::{AdminToken, ReadOnlyToken};
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage::audit::{AuditEvent, AuditEventType, AuditRepository};
+use crate::storage::grants::{GrantRecord, GrantStatus};
 use crate::storage::repository::wallets::{WalletRepository, WalletResponse, WalletStatus};
 
 // ============================================================================
@@ -463,6 +464,21 @@ pub async fn grant_right(
         ApiError::not_found(format!("DRT '{}' not found in pool", payload.drt_name))
     })?;
 
+    // Reject a re-grant before doing any network work. The on-chain
+    // `create_account` for the Grant PDA would also fail (custom error 0x0)
+    // but surfacing it as a clean 409 here means the UI can render a useful
+    // message instead of an opaque RPC simulation error.
+    if state
+        .tx_db
+        .is_grant_active(&payload.analyst_id, &pool_pda_str, &payload.drt_name)
+        .map_err(|e| ApiError::internal(format!("grant lookup: {e}")))?
+    {
+        return Err(ApiError::conflict(format!(
+            "analyst already holds an active grant for DRT '{}' in this pool",
+            payload.drt_name
+        )));
+    }
+
     // Verify the DRT script before any on-chain side effects.
     // The `append` DRT has no executable code (empty URL, zero hash) — skip it.
     if !drt.code_repo_url.is_empty() {
@@ -500,9 +516,30 @@ pub async fn grant_right(
     let (sig, events) =
         crate::api::pools::sign_send_and_parse(&state, &keypair, vec![ix], "finalized").await?;
 
+    // Mirror the on-chain grant into the local index so the dashboard can
+    // render the access list and the analyst's "my grants" view without
+    // walking the chain.
+    if let Err(e) = state.tx_db.upsert_grant(&crate::storage::grants::GrantRecord {
+        pool_pda: pool_pda_str.clone(),
+        analyst_id: payload.analyst_id.clone(),
+        drt_name: payload.drt_name.clone(),
+        grant_pda: grant_pda.to_string(),
+        commitment_hex: hex::encode(commitment),
+        owner_wallet_id: wallet.wallet_id.clone(),
+        granted_at: chrono::Utc::now().timestamp(),
+        granted_sig: sig.clone(),
+        status: crate::storage::grants::GrantStatus::Active,
+        revoked_at: None,
+        revoked_sig: None,
+    }) {
+        // The on-chain grant succeeded; a local index miss is not fatal,
+        // but operators need to know the access list is now stale.
+        tracing::error!(error = %e, pool = %pool_pda_str, drt = %payload.drt_name, "failed to index grant locally");
+    }
+
     let evt = AuditEvent::new(AuditEventType::RightGranted)
         .with_user(&token.sub)
-        .with_resource("drt_grant", grant_pda.to_string())
+        .with_resource("drt_pool", &pool_pda_str)
         .with_pool_pda(&pool_pda_str)
         .with_details(serde_json::json!({
             "pool_pda": pool_pda_str,
@@ -677,9 +714,20 @@ pub async fn revoke_grant(
     let (sig, events) =
         crate::api::pools::sign_send_and_parse(&state, &keypair, vec![ix], "finalized").await?;
 
+    // Mirror the on-chain revocation; missing local record is non-fatal (the
+    // grant may have been issued before the index existed).
+    if let Err(e) = state.tx_db.revoke_grant_local(
+        &pool_pda_str,
+        &payload.analyst_id,
+        &payload.drt_name,
+        &sig,
+    ) {
+        tracing::error!(error = %e, pool = %pool_pda_str, drt = %payload.drt_name, "failed to update grant index on revoke");
+    }
+
     let evt = AuditEvent::new(AuditEventType::RightRevoked)
         .with_user(&token.sub)
-        .with_resource("drt_grant", grant_pda.to_string())
+        .with_resource("drt_pool", &pool_pda_str)
         .with_pool_pda(&pool_pda_str)
         .with_details(serde_json::json!({
             "pool_pda": pool_pda_str,
@@ -722,5 +770,137 @@ pub async fn revoke_grant(
         explorer_url: crate::api::pools::explorer_url(&state, &sig),
         commitment_hex: hex::encode(commitment),
         grant_pda: grant_pda.to_string(),
+    }))
+}
+
+// ============================================================================
+// Grant listing endpoints (Phase 5: access list + analyst view)
+// ============================================================================
+
+/// Pool grants response (active + revoked).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PoolGrantsResponse {
+    pub active: Vec<GrantRecord>,
+    pub revoked: Vec<GrantRecord>,
+}
+
+/// List all grants (active and revoked) for a pool. Pool-owner only.
+#[utoipa::path(
+    get,
+    path = "/v1/drt/pools/{pool_pda}/grants",
+    tag = "drt",
+    params(("pool_pda" = String, Path, description = "Pool PDA (base58)")),
+    responses(
+        (status = 200, description = "Grant list", body = PoolGrantsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not pool owner"),
+        (status = 404, description = "Pool not found"),
+    )
+)]
+pub async fn list_pool_grants(
+    AdminToken(token): AdminToken,
+    State(state): State<AppState>,
+    Path(pool_pda_str): Path<String>,
+) -> Result<Json<PoolGrantsResponse>, ApiError> {
+    let meta = crate::api::pools::load_pool_meta(&state, &pool_pda_str)?;
+    let repo = WalletRepository::new(&state.storage);
+    let owner_wallet = repo
+        .get(&meta.owner_wallet_id)
+        .map_err(|_| ApiError::not_found("pool owner wallet not found"))?;
+    if owner_wallet.owner_user_id != token.sub {
+        return Err(ApiError::forbidden("you are not the pool owner"));
+    }
+
+    let all = state
+        .tx_db
+        .list_pool_grants(&pool_pda_str)
+        .map_err(|e| ApiError::internal(format!("grant lookup: {e}")))?;
+    let mut active = Vec::new();
+    let mut revoked = Vec::new();
+    for g in all {
+        match g.status {
+            GrantStatus::Active => active.push(g),
+            GrantStatus::Revoked => revoked.push(g),
+        }
+    }
+    Ok(Json(PoolGrantsResponse { active, revoked }))
+}
+
+/// One DRT in the analyst-facing view.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MyGrantEntry {
+    pub drt_name: String,
+    pub grant_pda: String,
+    pub granted_at: i64,
+    pub granted_sig: String,
+}
+
+/// One pool's worth of grants in the analyst-facing view.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MyGrantsPool {
+    pub pool_pda: String,
+    pub pool_name: String,
+    pub kind: String,
+    pub grants: Vec<MyGrantEntry>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MyGrantsResponse {
+    pub pools: Vec<MyGrantsPool>,
+}
+
+/// List active grants for the calling user, grouped by pool.
+#[utoipa::path(
+    get,
+    path = "/v1/drt/me/grants",
+    tag = "drt",
+    responses(
+        (status = 200, description = "Grants owned by the caller", body = MyGrantsResponse),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
+pub async fn list_my_grants(
+    ReadOnlyToken(token): ReadOnlyToken,
+    State(state): State<AppState>,
+) -> Result<Json<MyGrantsResponse>, ApiError> {
+    let grants = state
+        .tx_db
+        .list_grants_by_analyst(&token.sub)
+        .map_err(|e| ApiError::internal(format!("grant lookup: {e}")))?;
+
+    use std::collections::BTreeMap;
+    let mut by_pool: BTreeMap<String, MyGrantsPool> = BTreeMap::new();
+    for g in grants {
+        let entry = by_pool
+            .entry(g.pool_pda.clone())
+            .or_insert_with(|| {
+                let (pool_name, kind) = match crate::api::pools::load_pool_meta(&state, &g.pool_pda)
+                {
+                    Ok(m) => {
+                        let k = serde_json::to_value(m.kind)
+                            .ok()
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "unknown".to_string());
+                        (m.pool_name, k)
+                    }
+                    Err(_) => (g.pool_pda.clone(), "unknown".to_string()),
+                };
+                MyGrantsPool {
+                    pool_pda: g.pool_pda.clone(),
+                    pool_name,
+                    kind,
+                    grants: Vec::new(),
+                }
+            });
+        entry.grants.push(MyGrantEntry {
+            drt_name: g.drt_name,
+            grant_pda: g.grant_pda,
+            granted_at: g.granted_at,
+            granted_sig: g.granted_sig,
+        });
+    }
+
+    Ok(Json(MyGrantsResponse {
+        pools: by_pool.into_values().collect(),
     }))
 }

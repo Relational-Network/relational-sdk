@@ -152,6 +152,8 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         api::admin::grant_right,
         api::admin::revoke_grant,
         api::admin::get_grant_status,
+        api::admin::list_pool_grants,
+        api::admin::list_my_grants,
         // Credential / Pool discovery API
         api::credentials::upload_schema,
         api::credentials::get_schema,
@@ -217,6 +219,12 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         blockchain::drt::types::RevokeGrantRequest,
         blockchain::drt::types::GrantResponse,
         api::admin::GrantStatusResponse,
+        api::admin::PoolGrantsResponse,
+        api::admin::MyGrantEntry,
+        api::admin::MyGrantsPool,
+        api::admin::MyGrantsResponse,
+        storage::grants::GrantRecord,
+        storage::grants::GrantStatus,
         blockchain::drt::types::TxEventsResponse,
         blockchain::drt::types::DrtEventResponse,
         // Credential schemas

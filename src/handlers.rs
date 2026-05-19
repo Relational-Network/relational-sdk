@@ -299,13 +299,14 @@ pub async fn data_query(
         "Data query requested"
     );
 
-    let result = data_query_inner(&state, &payload).await;
+    let result = data_query_inner(&state, &token, &payload).await;
     record_drt_execution_audit(&state, &token, &payload, &result).await;
     result.map(Json)
 }
 
 async fn data_query_inner(
     state: &AppState,
+    token: &crate::auth::TokenData,
     payload: &DataQueryRequest,
 ) -> Result<DataQueryResponse, ApiError> {
     if payload.drt_name.is_empty() {
@@ -328,6 +329,20 @@ async fn data_query_inner(
         return Err(ApiError::bad_request(format!(
             "DRT '{}' has no executable script (append-only)",
             payload.drt_name
+        )));
+    }
+
+    // Enforce: the caller must hold an active grant for this DRT on this pool.
+    // Grants are mirrored locally from `grant_right` / `revoke_grant` so this
+    // is a single redb lookup — no chain round-trip on the hot query path.
+    if !state
+        .tx_db
+        .is_grant_active(&token.sub, &payload.pool_pda, &payload.drt_name)
+        .map_err(|e| ApiError::internal(format!("grant lookup: {e}")))?
+    {
+        return Err(ApiError::forbidden(format!(
+            "no active grant for DRT '{}' in pool {}",
+            payload.drt_name, payload.pool_pda
         )));
     }
 
@@ -414,7 +429,7 @@ async fn record_drt_execution_audit(
 
     let mut evt = AuditEvent::new(AuditEventType::DrtExecuted)
         .with_user(&token.sub)
-        .with_resource("drt", &payload.drt_name)
+        .with_resource("drt_pool", &payload.pool_pda)
         .with_pool_pda(&payload.pool_pda)
         .with_details(serde_json::Value::Object(details));
     evt.success = success;

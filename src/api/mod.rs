@@ -169,6 +169,12 @@ pub fn drt_router() -> Router<AppState> {
             "/v1/drt/pools/{pool_pda}/grant/{analyst_id}/{drt_name}",
             get(admin::get_grant_status),
         )
+        // ── Grant listing (access list + analyst view) ───────────
+        .route(
+            "/v1/drt/pools/{pool_pda}/grants",
+            get(admin::list_pool_grants),
+        )
+        .route("/v1/drt/me/grants", get(admin::list_my_grants))
         // ── Events ───────────────────────────────────────────────
         .route("/v1/drt/events/{signature}", get(pools::get_tx_events)) // ── Schema upload ────────────────────────────────────────
         .route(

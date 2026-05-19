@@ -52,9 +52,24 @@ pub const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 /// is 4 GiB, so don't push this past ~1.5 GiB.
 pub const MAX_INPUT_BYTES: usize = 600 * 1024 * 1024; // 600 MiB
 
-/// Fuel budget (`wasmi` "instructions"). Sized so the wall-clock cap below
-/// fires first for realistic workloads — fuel is defence in depth.
-pub const DEFAULT_FUEL: u64 = 10_000_000_000;
+/// Base fuel budget covering parser init, output assembly, and fixed
+/// per-invocation overhead independent of input size.
+pub const BASE_FUEL: u64 = 2_000_000_000;
+
+/// Additional fuel granted per byte of input. Wasmi charges ~1 unit per
+/// executed instruction; a typical CSV parser burns ~50–200 instructions
+/// per input byte (field scanning, copies, numeric parsing). 1_000/byte
+/// leaves a generous safety margin for more complex aggregation scripts
+/// while still bounding pathological loops (a 600 MiB input caps the
+/// budget at ~602B fuel — well within `u64`).
+pub const FUEL_PER_INPUT_BYTE: u64 = 1_000;
+
+/// Compute a fuel budget that scales with the input size. The 120s
+/// wall-clock cap (see [`DEFAULT_WALL_TIMEOUT`]) remains the real ceiling;
+/// fuel is defence in depth against tight loops in user-supplied WASM.
+fn fuel_budget(input_len: usize) -> u64 {
+    BASE_FUEL.saturating_add(FUEL_PER_INPUT_BYTE.saturating_mul(input_len as u64))
+}
 
 /// Hard wall-clock cap, defence in depth on top of fuel.
 pub const DEFAULT_WALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -86,6 +101,9 @@ pub enum RuntimeError {
     BadModule(String),
     /// Trap during execution — out of fuel, out of bounds, etc.
     Trap(String),
+    /// Wasmi reported that all fuel was consumed. Distinguished from
+    /// generic [`Trap`] so callers (and logs) get a clearer signal.
+    OutOfFuel { fuel: u64, input_len: usize },
     /// Wall-clock budget exceeded.
     Timeout,
     /// Input or output too large.
@@ -100,6 +118,11 @@ impl std::fmt::Display for RuntimeError {
             Self::Compile(m) => write!(f, "DRT runtime compile error: {m}"),
             Self::BadModule(m) => write!(f, "DRT runtime bad module: {m}"),
             Self::Trap(m) => write!(f, "DRT runtime trap: {m}"),
+            Self::OutOfFuel { fuel, input_len } => write!(
+                f,
+                "DRT script exceeded compute budget (fuel={fuel}, input_bytes={input_len}) \
+                 — input may be too large or script too expensive"
+            ),
             Self::Timeout => write!(f, "DRT runtime wall-clock timeout"),
             Self::SizeLimit(m) => write!(f, "DRT runtime size limit: {m}"),
             Self::InputEncoding(m) => write!(f, "DRT runtime input encoding: {m}"),
@@ -117,6 +140,7 @@ impl From<RuntimeError> for crate::error::ApiError {
                 Self::internal(format!("DRT script is invalid: {e}"))
             }
             RuntimeError::Trap(_) => Self::bad_request(e.to_string()),
+            RuntimeError::OutOfFuel { .. } => Self::bad_request(e.to_string()),
             RuntimeError::Timeout => Self::bad_request("DRT script timed out"),
             RuntimeError::SizeLimit(m) => Self::bad_request(m.clone()),
             RuntimeError::InputEncoding(_) => Self::internal(e.to_string()),
@@ -164,6 +188,15 @@ pub async fn execute(
 }
 
 fn run_blocking(wasm_bytes: &[u8], input: Vec<u8>) -> Result<RuntimeOutput, RuntimeError> {
+    let input_len = input.len();
+    let fuel = fuel_budget(input_len);
+
+    debug!(
+        target: "drt_runtime",
+        input_len, fuel,
+        "DRT execution starting"
+    );
+
     let mut config = Config::default();
     config.consume_fuel(true);
     let engine = Engine::new(&config);
@@ -178,7 +211,7 @@ fn run_blocking(wasm_bytes: &[u8], input: Vec<u8>) -> Result<RuntimeOutput, Runt
     };
     let mut store = Store::new(&engine, host_state);
     store
-        .set_fuel(DEFAULT_FUEL)
+        .set_fuel(fuel)
         .map_err(|e| RuntimeError::Compile(e.to_string()))?;
 
     let mut linker = <Linker<HostState>>::new(&engine);
@@ -275,7 +308,15 @@ fn run_blocking(wasm_bytes: &[u8], input: Vec<u8>) -> Result<RuntimeOutput, Runt
 
     let exit_code = run
         .call(&mut store, ())
-        .map_err(|e| RuntimeError::Trap(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            // wasmi surfaces "all fuel consumed by WebAssembly" on exhaustion.
+            if msg.contains("fuel") {
+                RuntimeError::OutOfFuel { fuel, input_len }
+            } else {
+                RuntimeError::Trap(msg)
+            }
+        })?;
 
     let state = store.into_data();
     if state.output_overflow {
