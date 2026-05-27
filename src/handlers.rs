@@ -252,12 +252,26 @@ async fn data_query_inner(
         return Err(ApiError::bad_request("pool has no data uploaded yet"));
     }
 
-    // 5. Sandboxed execution.
+    // 5. Sandboxed execution. Prime the AOT cache so subsequent calls skip
+    // Cranelift entirely (best-effort — falls through to JIT on failure).
+    let scripts_dir = state.storage.paths().root().join("drt-scripts");
+    let cache_path = match crate::drt::runtime::ensure_precompiled(
+        &scripts_dir,
+        &drt.code_hash_hex,
+        &wasm_bytes,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "AOT precompile skipped; falling back to JIT");
+            crate::drt::runtime::precompile_cache_path(&scripts_dir, &drt.code_hash_hex)
+        }
+    };
     let runtime_input = crate::drt::runtime::RuntimeInput {
         csv: &csv,
         args: &payload.args,
     };
-    let output = crate::drt::runtime::execute(wasm_bytes, runtime_input).await?;
+    let output =
+        crate::drt::runtime::execute_cached(cache_path, wasm_bytes, runtime_input).await?;
 
     // 6. Try to parse the body as JSON; fall back to a string blob otherwise.
     let result_json: serde_json::Value = serde_json::from_slice(&output.body)

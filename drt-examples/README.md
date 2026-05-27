@@ -1,7 +1,7 @@
 # drt-examples
 
 Sample DRT scripts that run inside the SGX enclave when an analyst invokes a
-granted Data Rights Token. Each script is a Rust crate compiled to
+granted Digital Rights Token. Each script is a Rust crate compiled to
 `wasm32-unknown-unknown`, with its SHA-256 pinned on-chain at DRT
 registration time and re-verified on every fetch.
 
@@ -19,8 +19,11 @@ drt-examples/
 
 Future DRTs live as sibling crates (`drt-examples/<name>/`). They are not
 part of the parent Cargo workspace — each is built standalone so its WASM
-profile (`opt-level = "z"`, LTO, panic = abort, strip) does not leak into
-the SDK build.
+release profile does not leak into the SDK build. The shipped profile is
+tuned for **runtime speed**, not file size (`opt-level = 3`, `lto = "fat"`,
+single codegen unit, `panic = abort`). The wasm is fetched once, then
+AOT-compiled to native by the enclave and cached on the encrypted FS, so
+the wire size is a one-off and the native code cost is what matters.
 
 ## Trust contract
 
@@ -32,37 +35,46 @@ The enclave will run a DRT script only if its SHA-256 matches the
 3. Enclave fetches `code_repo_url`, SHA-256-checks the bytes against
    `code_hash` (see `relational-sdk/src/drt/verified_fetch.rs`), rejects on
    mismatch, caches verified bytes under `/data/drt-scripts/<hash>`.
-4. Enclave loads the cached bytes into the `wasmi` sandbox (see
-   `relational-sdk/src/drt/runtime.rs`) and invokes the `run` export.
+4. Enclave loads the cached bytes into the `wasmtime` sandbox (see
+   `relational-sdk/src/drt/runtime.rs`), AOT-compiles them once via
+   Cranelift, caches the native artifact at
+   `/data/drt-scripts/{hash}.wt37.cwasm`, and invokes the `run` export.
 
 The cache is keyed by hash — the filename *is* the integrity claim, and the
-runtime re-hashes the bytes on every read.
+runtime re-hashes the bytes on every read. The `.cwasm` suffix is
+versioned by wasmtime release (`wt37`) so a runtime upgrade invalidates
+stale artifacts automatically.
 
-## Host ABI
+## Host ABI (zero-copy)
 
-A DRT module must export one function and import four:
+A DRT module exports two functions plus `memory` and imports one:
 
 | Direction | Signature | Notes |
 |---|---|---|
-| export | `run() -> i32` | 0 = success; non-zero = script-level error |
-| import | `env.host_input_len() -> i32` | bytes the host has staged |
-| import | `env.host_input_copy(dst: i32, len: i32) -> i32` | copies into wasm memory |
-| import | `env.host_output_write(src: i32, len: i32) -> i32` | appends to host output buffer; returns -1 on overflow |
-| import | `env.host_log(src: i32, len: i32)` | best-effort `debug!` log |
+| export | `memory` | default linear memory; host reads/writes directly |
+| export | `alloc(size: i32) -> i32` | bump allocator the host calls before `run` |
+| export | `run(csv_ptr: i32, csv_len: i32, args_ptr: i32, args_len: i32, out_ptr_cell: i32, out_len_cell: i32) -> i32` | 0 = success, non-zero = script-level error |
+| import | `env.host_log(src: i32, len: i32)` | best-effort diagnostic; no other imports |
 
-Input format (UTF-8 JSON, staged by the enclave):
+Flow on every query:
 
-```json
-{ "csv": "<header row plus all body rows>",
-  "args": { "...": "DRT-specific" } }
-```
+1. Host calls `alloc(csv_len)`, then writes the CSV bytes into `memory` at
+   the returned address.
+2. Host calls `alloc(args_len)`, then writes the args JSON.
+3. Host calls `alloc(8)` for two i32 output cells.
+4. Host calls `run(csv_ptr, csv_len, args_ptr, args_len, out_ptr_cell, out_len_cell)`.
+5. On return, the host reads two little-endian i32s from
+   `(out_ptr_cell, out_len_cell)` to find the output blob in `memory`.
+
+No JSON envelope — the CSV is delivered as raw bytes. `args` is a small
+UTF-8 JSON object scoped to the DRT.
 
 Output should be UTF-8 JSON. Errors should be `{"error": "..."}` with a
 non-zero exit from `run`.
 
-Sandbox limits enforced by the runtime: 64 MiB input, 4 MiB output, 50 M
-wasmi "fuel" instructions (~1 s on modest hardware), 30 s wall clock. No
-WASI, no filesystem, no clock — only the four imports above.
+Sandbox limits enforced by the runtime: 600 MiB input, 4 MiB output, 1 GiB
+guest memory cap, fuel cap (`2 × 10⁹ + 1000 × input_bytes` instructions),
+120 s wall clock. No WASI, no filesystem, no clock — only `host_log`.
 
 ## Build
 
@@ -79,9 +91,9 @@ Host-side tests (no wasm runtime needed):
 cargo test --target x86_64-unknown-linux-gnu
 ```
 
-End-to-end test through the enclave's wasmi runtime against the committed
-`dist/mean.wasm` lives at `relational-sdk/src/drt/runtime.rs` (run with
-`cd .. && cargo test drt::`).
+End-to-end test through the enclave's wasmtime runtime against the
+committed `dist/mean.wasm` lives at `relational-sdk/src/drt/runtime.rs`
+(run with `cd .. && cargo test drt::`).
 
 ## Publish
 

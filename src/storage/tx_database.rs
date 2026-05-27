@@ -328,8 +328,8 @@ impl TxDatabase {
         Ok(())
     }
 
-    /// Look up which wallet owns an address.
-    #[allow(dead_code)]
+    /// Look up which wallet owns an address. Called by the transaction indexer
+    /// (`indexer/poller.rs`) to attribute on-chain counterparties to wallets.
     pub fn get_wallet_id_for_address(&self, address: &str) -> TxDbResult<Option<String>> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(ADDRESS_WALLET_MAP)?;

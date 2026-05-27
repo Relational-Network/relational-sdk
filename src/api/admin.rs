@@ -482,12 +482,21 @@ pub async fn grant_right(
     // Verify the DRT script before any on-chain side effects.
     // The `append` DRT has no executable code (empty URL, zero hash) — skip it.
     if !drt.code_repo_url.is_empty() {
-        crate::drt::verified_fetch::fetch_and_verify(
+        let wasm_bytes = crate::drt::verified_fetch::fetch_and_verify(
             &drt.code_repo_url,
             &drt.code_hash_hex,
             &state.storage,
         )
         .await?;
+        // Best-effort AOT precompile so the first analyst query is warm.
+        let scripts_dir = state.storage.paths().root().join("drt-scripts");
+        if let Err(e) = crate::drt::runtime::ensure_precompiled(
+            &scripts_dir,
+            &drt.code_hash_hex,
+            &wasm_bytes,
+        ) {
+            tracing::warn!(error = %e, "AOT precompile at grant time skipped");
+        }
     }
 
     let right_id = crate::api::credentials::decode_right_id(&drt.right_id_hex)?;

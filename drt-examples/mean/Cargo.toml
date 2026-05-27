@@ -12,11 +12,15 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+# Optimise for speed, not size — Cranelift inlines through `lto = "fat"` and
+# the wasm is precompiled to native once at grant time, so the WASM file size
+# (~30–40 KiB) is a one-off network transfer that doesn't affect query latency.
 [profile.release]
-opt-level = "z"
-lto = true
+opt-level = 3
+lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = true
+strip = "symbols"
+overflow-checks = false
 
 [dependencies]
