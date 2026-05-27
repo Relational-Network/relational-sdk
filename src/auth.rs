@@ -411,10 +411,8 @@ impl FromRequestParts<AppState> for UserToken {
 ///
 /// Returns 403 Forbidden if the user has only read_only role.
 ///
-/// Not yet used on any route — analyst script execution is deferred
-/// to a separate sprint. The extractor is ready for when routes need it.
+/// Used by `/v1/data/query` and the pool-detail / summary / audit read paths.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AnalystToken(pub TokenData);
 
 impl FromRequestParts<AppState> for AnalystToken {

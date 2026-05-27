@@ -215,13 +215,8 @@ Health endpoints are unversioned; all others use `/v1/` prefix.
 ### Attestation
 - `GET /v1/attestation/public-key` — enclave public key (JWK)
 
-### Protected (require JWT)
-- `GET /v1/protected` — any authenticated user
-- `GET /v1/admin/status` — admin only
-- `POST /v1/data/validate` — validate CSV against `schema_id`
-- `POST /v1/data/upload-file` — validate + persist CSV
-- `POST /v1/data/upload` — user or admin
-- `GET /v1/data/query` — read_only, user, or admin
+### Data
+- `POST /v1/data/query` — analyst-only; runs a verified DRT (WASM) script against the granted pool's dataset
 
 ### User & Wallet
 - `GET  /v1/users/me` — current user identity
@@ -237,37 +232,44 @@ Health endpoints are unversioned; all others use `/v1/` prefix.
 - `GET  /v1/wallets/{id}/transactions` — list transactions
 - `GET  /v1/wallets/{id}/transactions/{sig}` — transaction status
 
-### DRT Pools
-- `POST /v1/drt/pools` — create pool on-chain
-- `GET  /v1/drt/pools/{pda}` — get pool info
-- `GET  /v1/drt/pools/by-owner/{pubkey}/{name}` — resolve pool by owner
-- `POST /v1/drt/pools/{pda}/buy` — buy DRT
-- `POST /v1/drt/pools/{pda}/redeem` — redeem DRT
-- `POST /v1/drt/pools/{pda}/close` — close pool
-- `GET  /v1/drt/pools/{pda}/balance/{type}` — DRT balance
-- `GET  /v1/drt/events/{sig}` — transaction events
+### DRT Pools (digital_rights_tokens program)
+- `POST /v1/drt/pools/malta` — create Malta (CSV-driven) pool
+- `POST /v1/drt/pools/iob-erp` — create IOB ERP (Jitterbit-driven) pool
+- `GET  /v1/drt/pools/{pda}` — pool info
+- `GET  /v1/drt/pools/{pda}/drt/{name}` — on-chain DRT inspection
+- `GET  /v1/drt/events/{sig}` — decoded transaction events
 
-### Credentials (pool owner, admin)
-- `POST /v1/drt/pools/{pda}/schema` — upload CSV schema
+### DRT Grants (pool owner ↔ analyst)
+- `POST /v1/drt/pools/{pda}/grant` — burn 1 admin DRT, write Grant PDA for analyst
+- `POST /v1/drt/pools/{pda}/revoke-grant` — close Grant PDA
+- `GET  /v1/drt/pools/{pda}/grant/{analyst_id}/{drt_name}` — live on-chain grant status
+- `GET  /v1/drt/pools/{pda}/grants` — local mirror (pool owner only): active + revoked
+- `GET  /v1/drt/me/grants` — caller's grants grouped by pool
+
+### Credentials (pool owner)
+- `POST /v1/drt/pools/{pda}/schema` — upload pool schema
+- `GET  /v1/drt/pools/{pda}/schema` — fetch pool schema
 - `POST /v1/drt/pools/{pda}/initialize` — seed initial dataset
-- `POST /v1/drt/pools/{pda}/issue` — issue credentials (redeems append DRT)
+- `POST /v1/drt/pools/{pda}/issue` — issue credentials (redeems an append DRT)
 - `POST /v1/drt/pools/{pda}/revoke` — revoke credentials
 - `GET  /v1/drt/pools/{pda}/revocations` — list revocations (paginated)
-- `GET  /v1/drt/pools/{pda}/audit` — pool-scoped audit log (paginated)
+- `GET  /v1/drt/pools/{pda}/audit` — pool-scoped audit log (paginated, filterable)
 - `GET  /v1/drt/pools/{pda}/summary` — pool metadata + on-chain state
 - `GET  /v1/drt/pools/{pda}/issuance-log` — issuance records (paginated)
 - `GET  /v1/drt/pools/by-wallet/{id}` — pools by wallet (paginated)
-- `GET  /v1/drt/pools/list` — all pools with filtering, sorting, pagination
+- `GET  /v1/drt/pools/list` — all pools (marketplace discovery)
 
 ### Admin
+- `GET  /v1/admin/status` — admin role check + uptime
 - `GET  /v1/admin/wallet-stats` — aggregate wallet stats
 - `GET  /v1/admin/wallets` — list all wallets (paginated)
 - `GET  /v1/admin/audit/events` — query audit log by date (paginated)
 - `POST /v1/admin/wallets/{id}/suspend` — suspend wallet
 - `POST /v1/admin/wallets/{id}/activate` — reactivate wallet
+- `POST /v1/admin/log-role-change` — record a role change in the audit trail
 
 ### Docs
-- `GET /docs` — Swagger UI
+- `GET /docs` — Swagger UI (built with `--features swagger-ui`)
 - `GET /api-doc/openapi.json` — OpenAPI spec
 
 ---
@@ -278,17 +280,20 @@ Health endpoints are unversioned; all others use `/v1/` prefix.
 2. Client sends JWT in `Authorization: Bearer <token>`
 3. Enclave validates JWT against AVS JWKS
 
-**Required claims:** `iss`, `sub`, `aud` (`relational-sdk`), `exp`, `role` (`admin`/`user`/`read_only`)
+**Required claims:** `iss`, `sub`, `aud` (`relational-sdk`), `exp`, `role` (`admin`/`user`/`analyst`/`read_only`), `enclave_public_key` (JWK — mandatory, must match the live enclave key)
 
-**Role hierarchy:** `admin` ⊃ `user` ⊃ `read_only`
+**Role hierarchy:** `admin` ⊃ `user` ⊃ `analyst` ⊃ `read_only`
+
+`sub` and `role` are derived by AVS from the verified Clerk session — the dashboard does not pass them in the `/v1/attest` body.
 
 ```bash
-TOKEN=$(curl -sk -X POST https://127.0.0.1:9100/v1/attest \
+TOKEN=$(curl -s -X POST http://127.0.0.1:9100/v1/attest \
   -H 'Content-Type: application/json' \
-  -d '{"enclave_url":"https://127.0.0.1:8080","user_id":"alice","role":"admin"}' \
+  -H "Authorization: Bearer $CLERK_TOKEN" \
+  -d '{"enclave_url":"https://127.0.0.1:8080"}' \
   | jq -r '.token')
 
-curl -sk https://127.0.0.1:8080/v1/protected -H "Authorization: Bearer $TOKEN"
+curl -sk https://127.0.0.1:8080/v1/users/me     -H "Authorization: Bearer $TOKEN"
 curl -sk https://127.0.0.1:8080/v1/admin/status -H "Authorization: Bearer $TOKEN"
 ```
 

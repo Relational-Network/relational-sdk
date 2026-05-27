@@ -16,9 +16,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 use utoipa::ToSchema;
-use uuid::Uuid;
 
-use crate::auth::{AdminToken, AnalystToken, UserToken};
+use crate::auth::{AdminToken, AnalystToken};
 use crate::config::MAX_BODY_SIZE;
 use crate::crypto::{enclave_key, Jwk};
 use crate::data_validation::{
@@ -109,120 +108,6 @@ pub(crate) struct MultipartCsvInput {
 
 pub(crate) struct ParsedCsvPayload {
     pub csv_bytes: Vec<u8>,
-}
-
-/// Request body for data upload.
-///
-/// 1. Decode `encrypted_data`, `ephemeral_public_key`, and `iv` from base64
-/// 2. Perform ECDH key agreement using the ephemeral public key + enclave private key
-/// 3. Derive AES-256-GCM key via HKDF, decrypt ciphertext
-/// 4. Validate `nonce` for replay protection (reject reused nonces)
-/// 5. Store decrypted payload to Gramine encrypted FS
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct DataUploadRequest {
-    /// Base64-encoded AES-GCM ciphertext (encrypted with derived ECDH shared secret).
-    pub encrypted_data: String,
-    /// Base64-encoded ephemeral P-256 public key (SEC1 uncompressed bytes).
-    /// The client generates this per-upload for forward secrecy.
-    pub ephemeral_public_key: String,
-    /// Base64-encoded 12-byte AES-GCM nonce/IV used for encryption.
-    pub iv: String,
-    /// Unique nonce for replay protection (required). Reject duplicate nonces.
-    pub nonce: String,
-}
-
-/// Response for data upload.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DataUploadResponse {
-    pub status: String,
-    pub record_id: String,
-}
-
-/// Upload encrypted data to the enclave.
-///
-/// Requires user or admin role. The data should be encrypted with
-/// the enclave's public key obtained via AVS attestation.
-#[utoipa::path(
-    post,
-    path = "/v1/data/upload",
-    tag = "Data",
-    summary = "Upload encrypted data",
-    description = "Upload encrypted data to the enclave. Requires user or admin role.",
-    security(("bearer_auth" = [])),
-    request_body = DataUploadRequest,
-    responses(
-        (status = 200, description = "Data uploaded", body = DataUploadResponse),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Forbidden - user role required")
-    )
-)]
-pub async fn data_upload(
-    UserToken(token): UserToken,
-    State(state): State<AppState>,
-    Json(payload): Json<DataUploadRequest>,
-) -> Result<Json<DataUploadResponse>, ApiError> {
-    let record_id = Uuid::new_v4().to_string();
-    info!(
-        sub = %token.sub,
-        role = %token.role,
-        record_id = %record_id,
-        data_size = payload.encrypted_data.len(),
-        "Data upload received"
-    );
-
-    // ── 1. Nonce replay protection (mandatory) ──────────────────────
-    {
-        let is_new = state
-            .tx_db
-            .record_nonce(&payload.nonce)
-            .map_err(|e| ApiError::internal(format!("nonce check failed: {e}")))?;
-        if !is_new {
-            return Err(ApiError::conflict("nonce already used — replay rejected"));
-        }
-        debug!(nonce = %payload.nonce, "Nonce accepted (first use)");
-    }
-
-    // ── 2. ECDH-ES + AES-256-GCM decryption ─────────────────────────
-    let plaintext = crate::crypto::decrypt_ecdh_payload(
-        &payload.encrypted_data,
-        &payload.ephemeral_public_key,
-        &payload.iv,
-    )
-    .map_err(ApiError::bad_request)?;
-
-    // ── 3. Store decrypted data to encrypted FS (Gramine auto-encrypts at rest)
-    let upload_dir = state
-        .storage
-        .paths()
-        .root()
-        .join("uploads")
-        .join("decrypted");
-    state.storage.create_dir(&upload_dir)?;
-
-    let data_path = upload_dir.join(format!("{record_id}.bin"));
-    state.storage.write_raw(&data_path, &plaintext)?;
-
-    // Persist metadata for audit/query.
-    let meta = serde_json::json!({
-        "record_id": record_id,
-        "uploaded_by": token.sub,
-        "plaintext_size_bytes": plaintext.len(),
-        "uploaded_at": chrono::Utc::now().to_rfc3339(),
-    });
-    let meta_path = upload_dir.join(format!("{record_id}.meta.json"));
-    state.storage.write_json(&meta_path, &meta)?;
-
-    info!(
-        sub = %token.sub,
-        record_id = %record_id,
-        plaintext_size = plaintext.len(),
-        "Decrypted data stored to encrypted FS"
-    );
-
-    Ok(Json(DataUploadResponse {
-        status: "stored".to_string(),
-        record_id,
-    }))
 }
 
 /// Request body for `/v1/data/query`.

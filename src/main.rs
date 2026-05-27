@@ -64,8 +64,8 @@ use config::{
 // The enclave only listens on localhost; browsers never connect directly.
 use crypto::enclave_key;
 use handlers::{
-    admin_status, data_query, data_upload, get_public_key, AdminStatusResponse, DataQueryRequest,
-    DataQueryResponse, DataUploadRequest, DataUploadResponse,
+    admin_status, data_query, get_public_key, AdminStatusResponse, DataQueryRequest,
+    DataQueryResponse,
 };
 use health::{health, liveness, readiness, HealthChecks, HealthResponse, ReadyResponse};
 use state::AppState;
@@ -125,7 +125,6 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         health::readiness,
         handlers::get_public_key,
         handlers::admin_status,
-        handlers::data_upload,
         handlers::data_query,
         // Wallet API
         api::users::get_me,
@@ -172,8 +171,6 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         ReadyResponse,
         HealthChecks,
         AdminStatusResponse,
-        DataUploadRequest,
-        DataUploadResponse,
         DataQueryRequest,
         DataQueryResponse,
         data_validation::ValidationError,
@@ -452,7 +449,6 @@ async fn main() {
         // v1 API endpoints.
         .route("/v1/attestation/public-key", get(get_public_key))
         .route("/v1/admin/status", get(admin_status))
-        .route("/v1/data/upload", post(data_upload))
         .route("/v1/data/query", post(data_query))
         .route("/api-doc/openapi.json", get(openapi_json))
         // Wallet service routes.

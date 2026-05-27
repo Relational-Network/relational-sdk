@@ -809,6 +809,12 @@ impl TxDatabase {
 
     /// Record a nonce. Returns `true` if the nonce was **new** (inserted),
     /// `false` if it was already present (replay detected).
+    ///
+    /// Currently no production handler calls this — `/v1/data/upload` was
+    /// removed and `initialize_pool` / `issue_credentials` have not yet
+    /// adopted replay-nonce checks (security-hardening.md N6). Tests exercise
+    /// the contract so behaviour is preserved for when N6 lands.
+    #[allow(dead_code)]
     pub fn record_nonce(&self, nonce: &str) -> TxDbResult<bool> {
         let write_txn = self.db.begin_write()?;
         let is_new = {
@@ -1073,11 +1079,11 @@ mod tests {
         (db, path)
     }
 
-    /// Confirms the contract that `/v1/data/upload` relies on for replay
-    /// protection: the same nonce can only be inserted once.
-    ///
-    /// The HTTP handler in `src/handlers.rs` calls `record_nonce(&req.nonce)?`
-    /// and rejects with 409 when this returns `false`.
+    /// Confirms the nonce-replay contract: the same nonce can only be
+    /// inserted once. HTTP handlers wire this to a 409 on replay.
+    /// Today only `/v1/data/query`-adjacent flows can adopt this; the
+    /// `initialize_pool` / `issue_credentials` endpoints still need
+    /// per-request `record_nonce` wiring (security-hardening.md N6).
     #[test]
     fn record_nonce_rejects_replay() {
         let (db, path) = fresh_db();
