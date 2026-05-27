@@ -120,7 +120,12 @@ ENV CARGO_PROFILE_RELEASE_STRIP=symbols
 ENV ZERO_AR_DATE=1
 # RUSTFLAGS env wins over target.<triple>.rustflags from .cargo/config.toml,
 # so the host's `link-arg=-fuse-ld=lld` setting is dropped (no lld in image).
-ENV RUSTFLAGS="-Ccodegen-units=1 -Cdebuginfo=0 -Cstrip=symbols -Clink-arg=-Wl,--build-id=none -Cllvm-args=-rng-seed=0 --remap-path-prefix=/build=."
+# `--cfg rustix_use_libc` is also mirrored here (not just in .cargo/config.toml)
+# precisely because this env replaces the config-file flags: it forces rustix
+# (via wasmtime) onto its libc backend so DRT-execution syscalls go through
+# Gramine's patched glibc instead of raw SYSCALL emulation. See the matching
+# note in .cargo/config.toml.
+ENV RUSTFLAGS="-Ccodegen-units=1 -Cdebuginfo=0 -Cstrip=symbols -Clink-arg=-Wl,--build-id=none -Cllvm-args=-rng-seed=0 --remap-path-prefix=/build=. --cfg rustix_use_libc"
 ENV CFLAGS="-g0 -frandom-seed=relational-sdk -Wno-builtin-macro-redefined -D__DATE__=\"redacted\" -D__TIME__=\"redacted\" -D__TIMESTAMP__=\"redacted\""
 ENV CXXFLAGS="-g0 -frandom-seed=relational-sdk -Wno-builtin-macro-redefined -D__DATE__=\"redacted\" -D__TIME__=\"redacted\" -D__TIMESTAMP__=\"redacted\""
 

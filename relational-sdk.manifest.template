@@ -102,20 +102,11 @@ sgx.enclave_size = "4G"
 sgx.remote_attestation = "{{ ra_type }}"
 sgx.isvprodid = {{ isvprodid }}
 sgx.isvsvn = {{ isvsvn }}
-# EDMM (Enclave Dynamic Memory Management) is REQUIRED by the wasmtime
-# Cranelift JIT used to run DRT scripts (src/drt/runtime.rs). Cranelift
-# allocates pages writable, emits code, then mprotect-flips them to RX.
-# Without EDMM, Gramine maps all dynamic memory as RWX (insecure W+X);
-# with EDMM, the per-page W→RX transition uses real mprotect. Default on;
-# opt out only for measurement-comparison builds.
-sgx.edmm_enable = {{ 'false' if env.get('EDMM', '1') == '0' else 'true' }}
-
-# Note: sgx.preheat_enclave is intentionally NOT set — it is invalid when
-# sgx.edmm_enable = true (no heap pages to pre-fault), per Gramine 1.8 docs.
-
-# `use_exinfo = true` is needed because the application may trigger lazy allocation of pages
-# (through exception handling) when EDMM is enabled
-sgx.use_exinfo = {{ 'false' if env.get('EDMM', '1') == '0' else 'true' }}
+# EDMM (per-page W→RX for the wasmtime JIT, src/drt/runtime.rs) needs an
+# EDMM-capable SGX driver, which this host's lacks — keep it + use_exinfo off.
+sgx.edmm_enable = false
+sgx.use_exinfo = false
+sgx.preheat_enclave = false
 
 sgx.trusted_files = [
     "file:{{ self_exe }}",

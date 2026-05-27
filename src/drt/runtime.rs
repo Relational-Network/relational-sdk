@@ -5,8 +5,9 @@
 //!
 //! ## Sandbox guarantees
 //!
-//! - Cranelift JIT inside Gramine SGX (requires `sgx.allow_jit = true` in the
-//!   manifest — Gramine ≥ 1.7).
+//! - Cranelift JIT inside Gramine SGX. JIT code pages are W+X under
+//!   non-EDMM Gramine and W^X (per-page `mprotect`) under EDMM; either
+//!   way Cranelift produces working code.
 //! - Module memory is capped by the engine; the DRT cannot grow past its
 //!   declared maximum and the host enforces an additional bound on input
 //!   stage size ([`MAX_INPUT_BYTES`]).
@@ -54,9 +55,18 @@
 //! ## AOT caching
 //!
 //! [`ensure_precompiled`] writes a `.cwasm` next to the cached `.wasm` so
-//! warm invocations skip Cranelift compilation entirely. The cache key
-//! embeds [`CWASM_VERSION_TAG`] so a wasmtime upgrade invalidates stale
-//! artifacts automatically.
+//! warm invocations skip Cranelift compilation entirely.
+//!
+//! wasmtime stamps each `.cwasm` with its *exact* version (e.g. `37.0.3`),
+//! the full [`Config`], and the host ISA flags, and `deserialize` rejects
+//! anything that doesn't match to the byte. The coarse [`CWASM_VERSION_TAG`]
+//! in the filename only namespaces by *major* version, so a patch bump, a
+//! `Config` tweak, or CPU-feature drift can leave a file whose name still
+//! matches but that the engine refuses to load. [`ensure_precompiled`]
+//! therefore *loads* any existing artifact to confirm the current engine
+//! accepts it (recompiling on mismatch), and [`run_blocking`] repairs the
+//! cache if a load ever slips through — so a stale artifact can never pin us
+//! to per-query JIT.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -96,9 +106,12 @@ fn fuel_budget(input_len: usize) -> u64 {
 /// top of fuel — enforced from the async caller via `tokio::time::timeout`.
 pub const DEFAULT_WALL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Cache-key suffix for precompiled `.cwasm` artifacts. Bump on any
-/// wasmtime upgrade that changes the on-disk format — stale entries will
-/// then be ignored and lazily replaced.
+/// Coarse cache-key suffix for precompiled `.cwasm` filenames — namespaces
+/// artifacts by wasmtime *major* version. This is only a hint: wasmtime
+/// enforces exact-version + `Config` + ISA compatibility internally on load,
+/// so correctness never depends on this tag (a patch bump keeps `wt37` but
+/// invalidates the artifact). See the "AOT caching" section above —
+/// [`ensure_precompiled`] validates and [`run_blocking`] self-heals.
 pub const CWASM_VERSION_TAG: &str = "wt37";
 
 /// Input blob the host stages for the DRT.
@@ -187,6 +200,28 @@ fn engine() -> Result<&'static Engine, RuntimeError> {
     config.cranelift_opt_level(wasmtime::OptLevel::Speed);
     config.wasm_simd(true);
     config.consume_fuel(true);
+
+    // ---- SGX-friendly linear-memory layout -----------------------------
+    //
+    // Wasmtime's default per-memory reservation is 4 GiB of virtual
+    // address space plus a 2 GiB guard region, sized for the wasm32 max
+    // and elided bounds checks on x86_64 hosts. Inside a Gramine SGX
+    // enclave, virtual == physical EPC and the enclave is only 4 GiB
+    // total, so the default reservation immediately fails:
+    //
+    //     mmap failed to reserve 0x104000000 bytes
+    //
+    // Cap the reservation at `MAX_GUEST_MEMORY_BYTES`, drop the guard
+    // pages, and switch to explicit bounds checks. This makes every
+    // memory access a Cranelift-emitted compare/branch instead of
+    // relying on signal-driven trap pages — the right tradeoff inside
+    // SGX, where signal delivery is emulated by Gramine anyway.
+    config.memory_reservation(MAX_GUEST_MEMORY_BYTES as u64);
+    config.memory_guard_size(0);
+    config.memory_reservation_for_growth(0);
+    config.memory_may_move(true);
+    config.signals_based_traps(false);
+
     // Standard on-demand allocator. The pooling allocator would let us
     // reuse linear-memory slots across queries, but in SGX virtual ==
     // physical EPC, so each pooled slot is a hard EPC reservation. Keep
@@ -211,17 +246,30 @@ pub fn ensure_precompiled(
     wasm_bytes: &[u8],
 ) -> Result<PathBuf, RuntimeError> {
     let path = precompile_cache_path(scripts_dir, hex_hash);
-    if path.exists() {
-        return Ok(path);
-    }
     let engine = engine()?;
+
+    // An existing artifact is only useful if *this* engine can load it.
+    // wasmtime keys `.cwasm` compatibility on its exact version, the full
+    // `Config`, and host ISA flags — none of which the `wt37` filename tag
+    // captures — so trusting `path.exists()` alone (as this once did) pins us
+    // to per-query JIT forever after a wasmtime patch bump. Confirm by loading
+    // and recompile on any mismatch.
+    if path.exists() {
+        // SAFETY: see `run_blocking` — process-private file on the encrypted
+        // FS, and wasmtime validates its header on load.
+        if unsafe { Module::deserialize_file(engine, &path) }.is_ok() {
+            return Ok(path);
+        }
+        warn!(path = ?path, "cached cwasm not loadable by current engine; recompiling");
+    }
+
     let bytes = engine
         .precompile_module(wasm_bytes)
         .map_err(|e| RuntimeError::Compile(e.to_string()))?;
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(&path, bytes).map_err(|e| RuntimeError::Compile(e.to_string()))?;
+    atomic_write(&path, &bytes).map_err(|e| RuntimeError::Compile(e.to_string()))?;
     Ok(path)
 }
 
@@ -295,9 +343,14 @@ fn run_blocking(
             match unsafe { Module::deserialize_file(engine, p) } {
                 Ok(m) => m,
                 Err(e) => {
-                    warn!(error=%e, path=?p, "cwasm load failed; JIT fallback");
-                    Module::new(engine, wasm_bytes)
-                        .map_err(|e| RuntimeError::Compile(e.to_string()))?
+                    warn!(error=%e, path=?p, "cwasm load failed; recompiling and healing cache");
+                    let m = Module::new(engine, wasm_bytes)
+                        .map_err(|e| RuntimeError::Compile(e.to_string()))?;
+                    // Repair the poisoned artifact so we don't re-pay Cranelift
+                    // (and re-log this warning) on every future query. Purely
+                    // best-effort: a failure here costs only a warm cache.
+                    heal_cwasm(p, &m);
+                    m
                 }
             }
         }
@@ -469,6 +522,47 @@ fn read_bytes(
         .ok_or_else(|| RuntimeError::Trap("output slice out of bounds".into()))
 }
 
+/// Best-effort rewrite of a poisoned `.cwasm` from an already-compiled
+/// module, so a one-off load failure (stale version, torn write, CPU drift)
+/// doesn't force JIT — and the accompanying warning — on every later query.
+fn heal_cwasm(path: &Path, module: &Module) {
+    match module.serialize() {
+        Ok(bytes) => {
+            if let Err(e) = atomic_write(path, &bytes) {
+                warn!(error = %e, path = ?path, "failed to rewrite healed cwasm");
+            }
+        }
+        Err(e) => warn!(error = %e, "failed to serialize module for cache heal"),
+    }
+}
+
+/// Atomically publish `bytes` to `path` via a uniquely-named temp file in the
+/// same directory followed by `rename`. A torn `.cwasm` from a crash mid-write
+/// would be rejected by `deserialize` forever (the filename tag can't tell it
+/// apart from a good one), so every write to the cache goes through here. The
+/// temp name is unique per process + call so concurrent writers don't clobber
+/// each other's partial file before the rename.
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("artifact");
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
+    ));
+    std::fs::write(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 // Silence the unused-constant warning on builds that exclude SGX-specific
 // guardrails (the constant is documented and referenced by the manifest).
 const _: usize = MAX_GUEST_MEMORY_BYTES;
@@ -485,6 +579,104 @@ mod tests {
 
     fn no_cache() -> PathBuf {
         PathBuf::from("/nonexistent/drt-cache/none.cwasm")
+    }
+
+    /// Unique scratch dir under the system temp dir; best-effort cleanup.
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "drt-rt-test-{tag}-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::create_dir_all(&p).expect("create temp dir");
+            Self(p)
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// `ensure_precompiled` produces a `.cwasm` the engine can load, and that
+    /// artifact drives `execute_cached` end-to-end.
+    #[tokio::test]
+    async fn aot_cache_round_trips() {
+        let dir = TmpDir::new("roundtrip");
+        let wasm = load_mean_wasm();
+        let path = ensure_precompiled(&dir.0, HASH, &wasm).expect("precompile");
+        assert!(path.exists(), "cwasm should be written");
+        // Sanity: the freshly written artifact loads under the live engine.
+        assert!(
+            unsafe { Module::deserialize_file(engine().unwrap(), &path) }.is_ok(),
+            "fresh cwasm must deserialize"
+        );
+
+        let csv = "id,value\n1,100\n2,200\n3,300\n";
+        let args = json!({ "column": "value" });
+        let out = execute_cached(path, wasm, RuntimeInput { csv, args: &args })
+            .await
+            .expect("cached execution succeeds");
+        assert_eq!(out.exit_code, 0);
+        assert!(std::str::from_utf8(&out.body).unwrap().contains("\"mean\":200"));
+    }
+
+    /// A stale/garbage artifact whose filename tag still matches must be
+    /// recompiled rather than trusted — the regression this fix targets.
+    #[test]
+    fn ensure_precompiled_recompiles_unloadable_artifact() {
+        let dir = TmpDir::new("stale");
+        let path = precompile_cache_path(&dir.0, HASH);
+        // Simulate a `.cwasm` left behind by an older wasmtime: right name,
+        // unparseable bytes.
+        std::fs::write(&path, b"not a real cwasm").unwrap();
+
+        let wasm = load_mean_wasm();
+        let returned = ensure_precompiled(&dir.0, HASH, &wasm).expect("recompile");
+        assert_eq!(returned, path);
+        assert!(
+            unsafe { Module::deserialize_file(engine().unwrap(), &path) }.is_ok(),
+            "stale artifact should have been replaced with a loadable one"
+        );
+    }
+
+    /// When execution hits a poisoned artifact it must still succeed (JIT
+    /// fallback) *and* repair the cache so the next call loads cleanly.
+    #[tokio::test]
+    async fn execution_heals_poisoned_cwasm() {
+        let dir = TmpDir::new("heal");
+        let path = precompile_cache_path(&dir.0, HASH);
+        std::fs::write(&path, b"poison").unwrap();
+
+        let csv = "id,value\n1,10\n2,20\n3,30\n";
+        let args = json!({ "column": "value" });
+
+        let out = execute_cached(
+            path.clone(),
+            load_mean_wasm(),
+            RuntimeInput { csv, args: &args },
+        )
+        .await
+        .expect("execution succeeds via JIT fallback");
+        assert_eq!(out.exit_code, 0);
+
+        // The poisoned file should now be a valid artifact.
+        assert!(
+            unsafe { Module::deserialize_file(engine().unwrap(), &path) }.is_ok(),
+            "execution should have healed the poisoned cwasm"
+        );
+
+        // And a second call now runs off the healed cache.
+        let out2 = execute_cached(path, load_mean_wasm(), RuntimeInput { csv, args: &args })
+            .await
+            .expect("second execution succeeds off healed cache");
+        assert_eq!(out2.exit_code, 0);
     }
 
     #[tokio::test]

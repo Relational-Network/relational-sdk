@@ -92,15 +92,11 @@ sgx.enclave_size = "4G"
 sgx.remote_attestation = "{{ ra_type }}"
 sgx.isvprodid = {{ isvprodid }}
 sgx.isvsvn = {{ isvsvn }}
-sgx.edmm_enable = true
-sgx.use_exinfo = true
-
-# EDMM is required so the wasmtime Cranelift JIT (src/drt/runtime.rs) can
-# mprotect newly emitted code pages from W to RX (real W^X). Without EDMM,
-# Gramine maps all dynamic memory as RWX, which is insecure.
-#
-# Note: sgx.preheat_enclave is intentionally NOT set — it is invalid when
-# sgx.edmm_enable = true (no heap pages to pre-fault), per Gramine 1.8 docs.
+# EDMM (per-page W→RX for the wasmtime JIT, src/drt/runtime.rs) needs an
+# EDMM-capable SGX driver, which this host's lacks — keep it + use_exinfo off.
+sgx.edmm_enable = false
+sgx.use_exinfo = false
+sgx.preheat_enclave = false
 
 # Trusted files are measured into MRENCLAVE. The Dockerfile rewrites this list
 # with an LC_ALL=C sorted, deduplicated enumeration of {{ gramine.runtimedir() }}
