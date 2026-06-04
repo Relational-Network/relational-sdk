@@ -284,7 +284,11 @@ pub async fn execute_cached(
     let csv = input.csv.to_owned();
     let args = serde_json::to_vec(input.args)
         .map_err(|e| RuntimeError::Compile(format!("args JSON encode: {e}")))?;
-    let cached = if cache_path.exists() { Some(cache_path) } else { None };
+    let cached = if cache_path.exists() {
+        Some(cache_path)
+    } else {
+        None
+    };
     run_with(wasm_bytes, cached, csv, args).await
 }
 
@@ -354,8 +358,9 @@ fn run_blocking(
                 }
             }
         }
-        None => Module::new(engine, wasm_bytes)
-            .map_err(|e| RuntimeError::Compile(e.to_string()))?,
+        None => {
+            Module::new(engine, wasm_bytes).map_err(|e| RuntimeError::Compile(e.to_string()))?
+        }
     };
 
     let mut store = Store::new(engine, HostState);
@@ -490,11 +495,7 @@ fn write_into_memory(
     Ok(())
 }
 
-fn read_i32(
-    memory: &Memory,
-    store: &Store<HostState>,
-    offset: usize,
-) -> Result<i32, RuntimeError> {
+fn read_i32(memory: &Memory, store: &Store<HostState>, offset: usize) -> Result<i32, RuntimeError> {
     let data = memory.data(store);
     let end = offset
         .checked_add(4)
@@ -624,7 +625,9 @@ mod tests {
             .await
             .expect("cached execution succeeds");
         assert_eq!(out.exit_code, 0);
-        assert!(std::str::from_utf8(&out.body).unwrap().contains("\"mean\":200"));
+        assert!(std::str::from_utf8(&out.body)
+            .unwrap()
+            .contains("\"mean\":200"));
     }
 
     /// A stale/garbage artifact whose filename tag still matches must be
@@ -683,9 +686,13 @@ mod tests {
     async fn mean_dot_wasm_executes_end_to_end() {
         let csv = "id,value\n1,100\n2,200\n3,300\n";
         let args = json!({ "column": "value" });
-        let out = execute_cached(no_cache(), load_mean_wasm(), RuntimeInput { csv, args: &args })
-            .await
-            .expect("execution succeeds");
+        let out = execute_cached(
+            no_cache(),
+            load_mean_wasm(),
+            RuntimeInput { csv, args: &args },
+        )
+        .await
+        .expect("execution succeeds");
         assert_eq!(out.exit_code, 0);
         let body = std::str::from_utf8(&out.body).unwrap();
         assert!(body.contains("\"count\":3"), "body: {body}");
@@ -697,9 +704,13 @@ mod tests {
     async fn mean_dot_wasm_reports_missing_column() {
         let csv = "id,value\n1,100\n";
         let args = json!({ "column": "other" });
-        let out = execute_cached(no_cache(), load_mean_wasm(), RuntimeInput { csv, args: &args })
-            .await
-            .expect("execution returns even on script-level error");
+        let out = execute_cached(
+            no_cache(),
+            load_mean_wasm(),
+            RuntimeInput { csv, args: &args },
+        )
+        .await
+        .expect("execution returns even on script-level error");
         assert_ne!(out.exit_code, 0);
         let body = std::str::from_utf8(&out.body).unwrap();
         assert!(body.contains("error"), "body: {body}");
@@ -709,9 +720,13 @@ mod tests {
     async fn mean_dot_wasm_counts_empty_cells_as_skipped() {
         let csv = "id,value\n1,10\n2,\n3,20\n4,\n5,30\n";
         let args = json!({ "column": "value" });
-        let out = execute_cached(no_cache(), load_mean_wasm(), RuntimeInput { csv, args: &args })
-            .await
-            .expect("execution succeeds with mixed empty cells");
+        let out = execute_cached(
+            no_cache(),
+            load_mean_wasm(),
+            RuntimeInput { csv, args: &args },
+        )
+        .await
+        .expect("execution succeeds with mixed empty cells");
         assert_eq!(out.exit_code, 0);
         let body = std::str::from_utf8(&out.body).unwrap();
         assert!(body.contains("\"count\":3"), "body: {body}");

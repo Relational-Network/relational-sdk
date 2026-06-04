@@ -904,9 +904,7 @@ impl TxDatabase {
         let updated;
         {
             let mut by_pool = write_txn.open_table(GRANTS_BY_POOL)?;
-            let existing_bytes = by_pool
-                .get(pool_key.as_str())?
-                .map(|v| v.value().to_vec());
+            let existing_bytes = by_pool.get(pool_key.as_str())?.map(|v| v.value().to_vec());
             updated = if let Some(bytes) = existing_bytes {
                 let mut rec: GrantRecord = serde_json::from_slice(&bytes)?;
                 rec.status = GrantStatus::Revoked;

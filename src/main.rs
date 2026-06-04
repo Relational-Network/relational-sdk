@@ -49,7 +49,8 @@ use axum::{
 use std::sync::Arc;
 use std::time::Instant;
 use tower_http::set_header::SetResponseHeaderLayer;
-use tracing::{info, warn};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tracing::{info, warn, Level};
 use tracing_subscriber::EnvFilter;
 use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
 #[cfg(feature = "swagger-ui")]
@@ -456,6 +457,12 @@ async fn main() {
         // DRT pool routes.
         .merge(api::drt_router())
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("x-content-type-options"),
             HeaderValue::from_static("nosniff"),

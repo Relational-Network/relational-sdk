@@ -490,11 +490,9 @@ pub async fn grant_right(
         .await?;
         // Best-effort AOT precompile so the first analyst query is warm.
         let scripts_dir = state.storage.paths().root().join("drt-scripts");
-        if let Err(e) = crate::drt::runtime::ensure_precompiled(
-            &scripts_dir,
-            &drt.code_hash_hex,
-            &wasm_bytes,
-        ) {
+        if let Err(e) =
+            crate::drt::runtime::ensure_precompiled(&scripts_dir, &drt.code_hash_hex, &wasm_bytes)
+        {
             tracing::warn!(error = %e, "AOT precompile at grant time skipped");
         }
     }
@@ -528,19 +526,22 @@ pub async fn grant_right(
     // Mirror the on-chain grant into the local index so the dashboard can
     // render the access list and the analyst's "my grants" view without
     // walking the chain.
-    if let Err(e) = state.tx_db.upsert_grant(&crate::storage::grants::GrantRecord {
-        pool_pda: pool_pda_str.clone(),
-        analyst_id: payload.analyst_id.clone(),
-        drt_name: payload.drt_name.clone(),
-        grant_pda: grant_pda.to_string(),
-        commitment_hex: hex::encode(commitment),
-        owner_wallet_id: wallet.wallet_id.clone(),
-        granted_at: chrono::Utc::now().timestamp(),
-        granted_sig: sig.clone(),
-        status: crate::storage::grants::GrantStatus::Active,
-        revoked_at: None,
-        revoked_sig: None,
-    }) {
+    if let Err(e) = state
+        .tx_db
+        .upsert_grant(&crate::storage::grants::GrantRecord {
+            pool_pda: pool_pda_str.clone(),
+            analyst_id: payload.analyst_id.clone(),
+            drt_name: payload.drt_name.clone(),
+            grant_pda: grant_pda.to_string(),
+            commitment_hex: hex::encode(commitment),
+            owner_wallet_id: wallet.wallet_id.clone(),
+            granted_at: chrono::Utc::now().timestamp(),
+            granted_sig: sig.clone(),
+            status: crate::storage::grants::GrantStatus::Active,
+            revoked_at: None,
+            revoked_sig: None,
+        })
+    {
         // The on-chain grant succeeded; a local index miss is not fatal,
         // but operators need to know the access list is now stale.
         tracing::error!(error = %e, pool = %pool_pda_str, drt = %payload.drt_name, "failed to index grant locally");
@@ -725,12 +726,11 @@ pub async fn revoke_grant(
 
     // Mirror the on-chain revocation; missing local record is non-fatal (the
     // grant may have been issued before the index existed).
-    if let Err(e) = state.tx_db.revoke_grant_local(
-        &pool_pda_str,
-        &payload.analyst_id,
-        &payload.drt_name,
-        &sig,
-    ) {
+    if let Err(e) =
+        state
+            .tx_db
+            .revoke_grant_local(&pool_pda_str, &payload.analyst_id, &payload.drt_name, &sig)
+    {
         tracing::error!(error = %e, pool = %pool_pda_str, drt = %payload.drt_name, "failed to update grant index on revoke");
     }
 
@@ -880,27 +880,24 @@ pub async fn list_my_grants(
     use std::collections::BTreeMap;
     let mut by_pool: BTreeMap<String, MyGrantsPool> = BTreeMap::new();
     for g in grants {
-        let entry = by_pool
-            .entry(g.pool_pda.clone())
-            .or_insert_with(|| {
-                let (pool_name, kind) = match crate::api::pools::load_pool_meta(&state, &g.pool_pda)
-                {
-                    Ok(m) => {
-                        let k = serde_json::to_value(m.kind)
-                            .ok()
-                            .and_then(|v| v.as_str().map(|s| s.to_string()))
-                            .unwrap_or_else(|| "unknown".to_string());
-                        (m.pool_name, k)
-                    }
-                    Err(_) => (g.pool_pda.clone(), "unknown".to_string()),
-                };
-                MyGrantsPool {
-                    pool_pda: g.pool_pda.clone(),
-                    pool_name,
-                    kind,
-                    grants: Vec::new(),
+        let entry = by_pool.entry(g.pool_pda.clone()).or_insert_with(|| {
+            let (pool_name, kind) = match crate::api::pools::load_pool_meta(&state, &g.pool_pda) {
+                Ok(m) => {
+                    let k = serde_json::to_value(m.kind)
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    (m.pool_name, k)
                 }
-            });
+                Err(_) => (g.pool_pda.clone(), "unknown".to_string()),
+            };
+            MyGrantsPool {
+                pool_pda: g.pool_pda.clone(),
+                pool_name,
+                kind,
+                grants: Vec::new(),
+            }
+        });
         entry.grants.push(MyGrantEntry {
             drt_name: g.drt_name,
             grant_pda: g.grant_pda,

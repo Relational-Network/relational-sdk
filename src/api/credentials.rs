@@ -1306,7 +1306,11 @@ pub async fn pool_audit(
 
     let total_filtered = filtered.len();
     let page: Vec<AuditEvent> = if has_filters {
-        filtered.into_iter().skip(query.offset).take(limit).collect()
+        filtered
+            .into_iter()
+            .skip(query.offset)
+            .take(limit)
+            .collect()
     } else {
         filtered
     };

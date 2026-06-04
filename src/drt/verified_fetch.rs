@@ -152,11 +152,7 @@ pub async fn fetch_and_verify(
 }
 
 fn cache_path_for(storage: &EncryptedStorage, hash_hex: &str) -> PathBuf {
-    storage
-        .paths()
-        .root()
-        .join("drt-scripts")
-        .join(hash_hex)
+    storage.paths().root().join("drt-scripts").join(hash_hex)
 }
 
 fn try_load_from_cache(
@@ -225,8 +221,8 @@ fn decode_hash(hex_str: &str) -> Result<[u8; 32], VerifiedFetchError> {
             hex_str.len()
         )));
     }
-    let bytes = hex::decode(hex_str)
-        .map_err(|e| VerifiedFetchError::InvalidExpectedHash(e.to_string()))?;
+    let bytes =
+        hex::decode(hex_str).map_err(|e| VerifiedFetchError::InvalidExpectedHash(e.to_string()))?;
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
@@ -269,23 +265,21 @@ mod tests {
 
     #[test]
     fn rejects_http_scheme() {
-        let err = validate_url("http://raw.githubusercontent.com/relational-network/x/main/y").unwrap_err();
+        let err = validate_url("http://raw.githubusercontent.com/relational-network/x/main/y")
+            .unwrap_err();
         matches!(err, VerifiedFetchError::InvalidUrl(_));
     }
 
     #[test]
     fn rejects_wrong_host() {
-        let err =
-            validate_url("https://example.com/relational-network/x/main/y").unwrap_err();
+        let err = validate_url("https://example.com/relational-network/x/main/y").unwrap_err();
         matches!(err, VerifiedFetchError::InvalidUrl(_));
     }
 
     #[test]
     fn rejects_non_allowlisted_owner() {
-        let err = validate_url(
-            "https://raw.githubusercontent.com/some-other-org/x/main/y",
-        )
-        .unwrap_err();
+        let err =
+            validate_url("https://raw.githubusercontent.com/some-other-org/x/main/y").unwrap_err();
         matches!(err, VerifiedFetchError::InvalidUrl(_));
     }
 

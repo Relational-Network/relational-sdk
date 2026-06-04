@@ -270,12 +270,13 @@ async fn data_query_inner(
         csv: &csv,
         args: &payload.args,
     };
-    let output =
-        crate::drt::runtime::execute_cached(cache_path, wasm_bytes, runtime_input).await?;
+    let output = crate::drt::runtime::execute_cached(cache_path, wasm_bytes, runtime_input).await?;
 
     // 6. Try to parse the body as JSON; fall back to a string blob otherwise.
-    let result_json: serde_json::Value = serde_json::from_slice(&output.body)
-        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&output.body).into()));
+    let result_json: serde_json::Value =
+        serde_json::from_slice(&output.body).unwrap_or_else(|_| {
+            serde_json::Value::String(String::from_utf8_lossy(&output.body).into())
+        });
 
     Ok(DataQueryResponse {
         pool_pda: payload.pool_pda.clone(),
