@@ -99,7 +99,7 @@ dashmap = { version = "6", default-features = false }
 # `sgx.allow_jit = true` in the manifest. If a deployment must run
 # without that flag (e.g. older Gramine), swap `Strategy::Cranelift`
 # for `Strategy::Pulley` in `src/drt/runtime.rs`.
-wasmtime = { version = "37", default-features = false, features = [
+wasmtime = { version = "43.0.2", default-features = false, features = [
     "runtime",
     "cranelift",
     "parallel-compilation",
