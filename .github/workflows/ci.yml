@@ -78,6 +78,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.rust == 'true'
+    env:
+      # The repo's .cargo/config.toml sets `rustc-wrapper = "sccache"` for local
+      # dev. sccache isn't installed on CI runners, so leaving it set makes cargo
+      # fail with "could not execute process `sccache ...` (No such file or
+      # directory)". Unset it here (an empty value disables the wrapper), mirroring
+      # what docker/Dockerfile does. Swatinem/rust-cache already handles caching.
+      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v6.0.2
 
