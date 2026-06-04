@@ -318,18 +318,11 @@ jobs:
                 exit 1
             }
 
-            echo ""
-            echo "=== Testing attestation ==="
-            ATTEST=$(curl -s --max-time 30 -X POST http://127.0.0.1:9100/v1/attest \
-                -H 'Content-Type: application/json' \
-                -d '{"enclave_url":"https://127.0.0.1:8080","user_id":"cd-test","role":"user"}')
-
-            if echo "$ATTEST" | grep -q '"token"'; then
-                echo "✅ Attestation successful!"
-            else
-                echo "❌ Attestation failed: $ATTEST"
-                exit 1
-            fi
+            # Note: end-to-end attestation requires a Clerk Bearer token, which
+            # CI does not have. The public smoke tests in the verify-public job
+            # cover what we can validate without auth (health, JWKS, enclave
+            # public key). A successful enclave start already implies the secret
+            # provisioning RA-TLS handshake against AVS:4433 passed end-to-end.
 
             echo ""
             echo "=== Cleaning up old images ==="

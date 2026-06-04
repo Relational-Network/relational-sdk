@@ -141,13 +141,14 @@ fi
 
 # Step 9: Test attestation
 echo ""
-echo "=== Step 9: Testing attestation ==="
-ATTEST_RESULT=$(curl -s --max-time 30 -X POST http://127.0.0.1:9100/v1/attest \
-    -H 'Content-Type: application/json' \
-    -d '{"enclave_url":"https://127.0.0.1:8080","user_id":"deploy-test","role":"user"}')
-
-if echo "$ATTEST_RESULT" | grep -q '"token"'; then
-    echo "✅ Attestation successful!"
+echo "=== Step 9: Verifying public endpoints ==="
+# /v1/attest now requires a Clerk Bearer token, so we cannot exercise the full
+# attestation flow from a deploy script. Instead, verify the unauthenticated
+# endpoints — a successful enclave start already implies that secret
+# provisioning (RA-TLS to AVS:4433) succeeded.
+if curl -sf --max-time 10 http://127.0.0.1:9100/.well-known/jwks.json >/dev/null \
+    && curl -sfk --max-time 10 https://127.0.0.1:8080/health >/dev/null; then
+    echo "✅ Public smoke tests passed!"
     echo ""
     echo "=============================================="
     echo "  Deployment Complete!"
@@ -163,9 +164,9 @@ if echo "$ATTEST_RESULT" | grep -q '"token"'; then
         gramine-sgx-sigstruct-view relational-sdk.sig | grep -E "mr_(enclave|signer):"
     fi
 else
-    echo "❌ Attestation failed!"
-    echo "Response: $ATTEST_RESULT"
+    echo "❌ Public smoke tests failed!"
     echo ""
-    echo "Check AVS logs: sudo journalctl -u avs -f"
+    echo "Check AVS logs:     sudo journalctl -u avs -f"
+    echo "Check enclave logs: sudo journalctl -u enclave -f"
     exit 1
 fi
