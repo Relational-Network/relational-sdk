@@ -6,8 +6,15 @@ SGX enclave server with RA-TLS, JWT validation, and role-based access control (R
 
 - **RA-TLS (DCAP)**: TLS certificates bound to SGX attestation
 - **JWT Validation**: Validates AVS-issued tokens with JWKS caching
-- **RBAC**: Role-based access control (admin, user, read_only)
+- **RBAC**: Role-based access control (admin, user, analyst, read_only)
 - **WebCrypto Ready**: Exposes P-256 public key for browser-side encryption
+- **Custodial Wallets**: Create/manage Solana wallets (1 per user, enforced via redb index)
+- **DRT Pools**: Create, buy, redeem, and close Data Rights Token pools on-chain
+- **Credential Issuance**: Upload schemas, issue/revoke credentials, full issuance log
+- **Audit Trail**: HMAC-signed JSONL events + redb-indexed dual-write for O(k) queries
+- **Embedded Database**: 13 redb tables for wallets, pools, issuance, revocations, and audit
+- **Pagination**: All list endpoints support `limit`/`offset` query parameters
+- **Swagger UI**: Auto-generated OpenAPI docs at `/docs`
 
 ---
 
@@ -42,7 +49,7 @@ The image is pre-signed at build time — no signing key is needed at runtime.
 # Build (signs enclave at build time via BuildKit secret)
 make docker-build
 # or with a custom key:
-make docker-build SIGNING_KEY=/path/to/enclave-key.pem
+make docker-build SGX_SIGNING_KEY=/path/to/enclave-key.pem
 
 # Run (requires SGX hardware)
 make docker-run
@@ -107,25 +114,25 @@ curl -sk https://127.0.0.1:8080/v1/attestation/public-key | jq
 
 ## Enclave Measurements & Reproducibility
 
-The MRENCLAVE hash uniquely identifies the enclave binary and trusted files. `measurements.txt`
-is the committed source of truth.
-
-**Current measurements:** [`measurements.txt`](measurements.txt)
+The MRENCLAVE hash uniquely identifies the enclave binary and trusted files. [`measurements.toml`](measurements.toml)
+is the committed source of truth and pins the full build contract (base image SHA, Ubuntu snapshot,
+Gramine and Rust versions, SIGSTRUCT date, and the expected `[enclave]` block).
 
 ```bash
-# Build locally (no cache) and compare against measurements.txt
-make verify-mrenclave
+# Print [enclave] block from a locally built image (in measurements.toml layout)
+make docker-sigstruct
 
-# Also compare against a specific GHCR image
-make verify-mrenclave DOCKER_IMAGE=ghcr.io/relational-network/relational-sdk:sha-<commit>
+# Rebuild --no-cache and verify mr_enclave matches measurements.toml
+make verify-mrenclave
 ```
 
-**When MRENCLAVE changes** (code, Gramine/SGX packages, Rust toolchain, or `SGX_DEBUG` changes):
-1. Run `make verify-mrenclave` — prints both old and new hashes
-2. Update `measurements.txt` with the new hash
-3. Commit code change + `measurements.txt` together in the same PR
+**When MRENCLAVE changes** (code, Gramine/SGX packages, Rust toolchain, or trusted files change):
+1. Run `make docker-build && make docker-sigstruct` — prints the new `[enclave]` block
+2. Paste the new block into `measurements.toml`
+3. Commit code change + `measurements.toml` together in the same PR
 
-CI fails if the built `mr_enclave` differs from `measurements.txt`, preventing silent changes.
+CI fails if the built `mr_enclave` differs from `measurements.toml`, preventing silent changes.
+The signing key is consumed at build time only and is never present in any image layer or on the staging VM.
 
 | Factor | MRENCLAVE | MRSIGNER |
 |--------|:---------:|:--------:|
@@ -141,7 +148,7 @@ CI fails if the built `mr_enclave` differs from `measurements.txt`, preventing s
 
 ### CI/CD Overview
 
-- **CI** (`ci.yml`): Lint, test, build + sign Docker image, push to GHCR, verify MRENCLAVE matches `measurements.txt`
+- **CI** (`ci.yml`): Lint, test, build + sign Docker image, push to GHCR, verify MRENCLAVE matches `measurements.toml`, fail on `debug_enclave != False`, print deploy-by-digest reference to the run summary
 - **CD** (`cd-staging.yml`): Pull pre-built image from GHCR, deploy to staging VM
 
 The staging VM does **not** build or sign — it only runs the pre-built image from GHCR.
@@ -208,16 +215,61 @@ Health endpoints are unversioned; all others use `/v1/` prefix.
 ### Attestation
 - `GET /v1/attestation/public-key` — enclave public key (JWK)
 
-### Protected (require JWT)
-- `GET /v1/protected` — any authenticated user
-- `GET /v1/admin/status` — admin only
-- `POST /v1/data/validate` — validate CSV against `schema_id`
-- `POST /v1/data/upload-file` — validate + persist CSV
-- `POST /v1/data/upload` — user or admin
-- `GET /v1/data/query` — read_only, user, or admin
+### Data
+- `POST /v1/data/query` — analyst-only; runs a verified DRT (WASM) script against the granted pool's dataset
+
+### User & Wallet
+- `GET  /v1/users/me` — current user identity
+- `POST /v1/wallets` — create wallet (one per user)
+- `GET  /v1/wallets` — list caller's wallets
+- `GET  /v1/wallets/{id}` — get wallet
+- `DELETE /v1/wallets/{id}` — soft-delete wallet
+
+### Balance & Transactions
+- `GET  /v1/wallets/{id}/balance` — SPL token + SOL balance
+- `POST /v1/wallets/{id}/estimate` — estimate transaction fee
+- `POST /v1/wallets/{id}/send` — send SOL/SPL
+- `GET  /v1/wallets/{id}/transactions` — list transactions
+- `GET  /v1/wallets/{id}/transactions/{sig}` — transaction status
+
+### DRT Pools (digital_rights_tokens program)
+- `POST /v1/drt/pools/malta` — create Malta (CSV-driven) pool
+- `POST /v1/drt/pools/iob-erp` — create IOB ERP (Jitterbit-driven) pool
+- `GET  /v1/drt/pools/{pda}` — pool info
+- `GET  /v1/drt/pools/{pda}/drt/{name}` — on-chain DRT inspection
+- `GET  /v1/drt/events/{sig}` — decoded transaction events
+
+### DRT Grants (pool owner ↔ analyst)
+- `POST /v1/drt/pools/{pda}/grant` — burn 1 admin DRT, write Grant PDA for analyst
+- `POST /v1/drt/pools/{pda}/revoke-grant` — close Grant PDA
+- `GET  /v1/drt/pools/{pda}/grant/{analyst_id}/{drt_name}` — live on-chain grant status
+- `GET  /v1/drt/pools/{pda}/grants` — local mirror (pool owner only): active + revoked
+- `GET  /v1/drt/me/grants` — caller's grants grouped by pool
+
+### Credentials (pool owner)
+- `POST /v1/drt/pools/{pda}/schema` — upload pool schema
+- `GET  /v1/drt/pools/{pda}/schema` — fetch pool schema
+- `POST /v1/drt/pools/{pda}/initialize` — seed initial dataset
+- `POST /v1/drt/pools/{pda}/issue` — issue credentials (redeems an append DRT)
+- `POST /v1/drt/pools/{pda}/revoke` — revoke credentials
+- `GET  /v1/drt/pools/{pda}/revocations` — list revocations (paginated)
+- `GET  /v1/drt/pools/{pda}/audit` — pool-scoped audit log (paginated, filterable)
+- `GET  /v1/drt/pools/{pda}/summary` — pool metadata + on-chain state
+- `GET  /v1/drt/pools/{pda}/issuance-log` — issuance records (paginated)
+- `GET  /v1/drt/pools/by-wallet/{id}` — pools by wallet (paginated)
+- `GET  /v1/drt/pools/list` — all pools (marketplace discovery)
+
+### Admin
+- `GET  /v1/admin/status` — admin role check + uptime
+- `GET  /v1/admin/wallet-stats` — aggregate wallet stats
+- `GET  /v1/admin/wallets` — list all wallets (paginated)
+- `GET  /v1/admin/audit/events` — query audit log by date (paginated)
+- `POST /v1/admin/wallets/{id}/suspend` — suspend wallet
+- `POST /v1/admin/wallets/{id}/activate` — reactivate wallet
+- `POST /v1/admin/log-role-change` — record a role change in the audit trail
 
 ### Docs
-- `GET /docs` — Swagger UI
+- `GET /docs` — Swagger UI (built with `--features swagger-ui`)
 - `GET /api-doc/openapi.json` — OpenAPI spec
 
 ---
@@ -228,17 +280,20 @@ Health endpoints are unversioned; all others use `/v1/` prefix.
 2. Client sends JWT in `Authorization: Bearer <token>`
 3. Enclave validates JWT against AVS JWKS
 
-**Required claims:** `iss`, `sub`, `aud` (`relational-sdk`), `exp`, `role` (`admin`/`user`/`read_only`)
+**Required claims:** `iss`, `sub`, `aud` (`relational-sdk`), `exp`, `role` (`admin`/`user`/`analyst`/`read_only`), `enclave_public_key` (JWK — mandatory, must match the live enclave key)
 
-**Role hierarchy:** `admin` ⊃ `user` ⊃ `read_only`
+**Role hierarchy:** `admin` ⊃ `user` ⊃ `analyst` ⊃ `read_only`
+
+`sub` and `role` are derived by AVS from the verified Clerk session — the dashboard does not pass them in the `/v1/attest` body.
 
 ```bash
-TOKEN=$(curl -sk -X POST https://127.0.0.1:9100/v1/attest \
+TOKEN=$(curl -s -X POST http://127.0.0.1:9100/v1/attest \
   -H 'Content-Type: application/json' \
-  -d '{"enclave_url":"https://127.0.0.1:8080","user_id":"alice","role":"admin"}' \
+  -H "Authorization: Bearer $CLERK_TOKEN" \
+  -d '{"enclave_url":"https://127.0.0.1:8080"}' \
   | jq -r '.token')
 
-curl -sk https://127.0.0.1:8080/v1/protected -H "Authorization: Bearer $TOKEN"
+curl -sk https://127.0.0.1:8080/v1/users/me     -H "Authorization: Bearer $TOKEN"
 curl -sk https://127.0.0.1:8080/v1/admin/status -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -273,7 +328,7 @@ See [`attestation-client/README.md`](attestation-client/README.md) for details.
 
 | Module | Description |
 |--------|-------------|
-| `main.rs` | Entry point, router setup, CORS, security headers |
+| `main.rs` | Entry point, router setup, CORS, security headers, OpenAPI |
 | `config.rs` | Configuration constants, env var helpers (CORS, Solana, storage) |
 | `auth.rs` | JWT validation, JWKS caching (10s timeout), RBAC extractors |
 | `crypto.rs` | Enclave keypair, JWK/JWKS types |
@@ -283,16 +338,19 @@ See [`attestation-client/README.md`](attestation-client/README.md) for details.
 | `health.rs` | /health, /health/live, /health/ready |
 | `state.rs` | AppState (JWKS cache, storage, Solana client, tx DB) |
 | `tls.rs` | RA-TLS PEM loading + normalization |
-| `indexer/` | Background Solana transaction poller |
-| `api/admin.rs` | Wallet stats, list all, audit query, suspend/activate |
+| `indexer/` | Background Solana transaction poller with sync cooldown |
+| `api/mod.rs` | Router assembly, shared pagination, wallet lookup helpers |
+| `api/admin.rs` | Wallet stats, list all (paginated), audit query, suspend/activate |
 | `api/balance.rs` | SPL token + native SOL balance |
+| `api/credentials.rs` | Credential issuance, revocation, pool discovery (paginated) |
 | `api/pools.rs` | DRT pool CRUD: create/get/buy/redeem/close |
 | `api/transactions.rs` | Estimate fee, send, list, status |
 | `api/users.rs` | GET /v1/me — user identity |
-| `api/wallets.rs` | Create/list/get/delete wallet |
+| `api/wallets.rs` | Create/list/get/delete wallet (1-wallet-per-user enforced) |
 | `blockchain/` | SolanaClient, signing, SPL token ops, DRT contract |
-| `storage/audit.rs` | Per-wallet audit event log |
-| `storage/tx_database.rs` | redb-backed durable transaction store |
+| `storage/audit.rs` | Audit event log with HMAC integrity + redb dual-write |
+| `storage/pool_metadata.rs` | PoolMetadata struct + PoolState lifecycle enum |
+| `storage/tx_database.rs` | redb-backed durable store (13 tables: wallets, pools, audit, etc.) |
 | `storage/tx_cache.rs` | LRU cache (128 entries, 30s TTL) |
 | `storage/repository/` | Typed read/write for wallets, transactions |
 

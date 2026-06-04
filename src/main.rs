@@ -30,9 +30,11 @@ mod blockchain;
 mod config;
 mod crypto;
 mod data_validation;
+mod drt;
 mod error;
 mod handlers;
 mod health;
+mod http_client;
 mod indexer;
 mod state;
 mod storage;
@@ -42,7 +44,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{header, HeaderValue},
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -50,6 +52,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
+#[cfg(feature = "swagger-ui")]
 use utoipa_swagger_ui::SwaggerUi;
 
 use config::{
@@ -61,9 +64,8 @@ use config::{
 // The enclave only listens on localhost; browsers never connect directly.
 use crypto::enclave_key;
 use handlers::{
-    admin_status, data_query, data_upload, data_upload_file, data_validate, get_public_key,
-    protected, AdminStatusResponse, DataFileUploadResponse, DataQueryResponse, DataUploadRequest,
-    DataUploadResponse, DataValidateResponse, ProtectedResponse,
+    admin_status, data_query, get_public_key, AdminStatusResponse, DataQueryRequest,
+    DataQueryResponse,
 };
 use health::{health, liveness, readiness, HealthChecks, HealthResponse, ReadyResponse};
 use state::AppState;
@@ -122,11 +124,7 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         health::liveness,
         health::readiness,
         handlers::get_public_key,
-        handlers::protected,
         handlers::admin_status,
-        handlers::data_validate,
-        handlers::data_upload,
-        handlers::data_upload_file,
         handlers::data_query,
         // Wallet API
         api::users::get_me,
@@ -135,7 +133,6 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         api::wallets::get_wallet,
         api::wallets::delete_wallet,
         api::balance::get_balance,
-        api::balance::get_native_balance,
         api::transactions::estimate_fee,
         api::transactions::send_transaction,
         api::transactions::list_transactions,
@@ -145,28 +142,39 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         api::admin::query_audit_logs,
         api::admin::suspend_wallet,
         api::admin::activate_wallet,
-        // DRT Pool API
-        api::pools::create_pool,
+        // DRT Pool API (new contract)
+        api::pools::create_malta_pool,
+        api::pools::create_iob_erp_pool,
         api::pools::get_pool,
-        api::pools::get_pool_by_owner,
-        api::pools::buy_drt,
-        api::pools::redeem_drt,
-        api::pools::close_pool,
-        api::pools::get_drt_balance,
         api::pools::get_tx_events,
+        api::pools::get_drt,
+        api::admin::grant_right,
+        api::admin::revoke_grant,
+        api::admin::get_grant_status,
+        api::admin::list_pool_grants,
+        api::admin::list_my_grants,
+        // Credential / Pool discovery API
+        api::credentials::upload_schema,
+        api::credentials::get_schema,
+        api::credentials::initialize_pool,
+        api::credentials::issue_credentials,
+        api::credentials::revoke_credentials,
+        api::credentials::list_revocations,
+        api::credentials::pool_audit,
+        api::credentials::pool_summary,
+        api::credentials::get_issuance_log,
+        api::credentials::list_pools_by_wallet,
+        api::credentials::list_all_pools,
     ),
     components(schemas(
         HealthResponse,
         ReadyResponse,
         HealthChecks,
-        ProtectedResponse,
         AdminStatusResponse,
-        DataUploadRequest,
-        DataUploadResponse,
-        DataValidateResponse,
-        DataFileUploadResponse,
+        DataQueryRequest,
         DataQueryResponse,
         data_validation::ValidationError,
+        data_validation::ValidationMode,
         crypto::Jwk,
         // Wallet schemas
         api::users::UserMeResponse,
@@ -176,7 +184,6 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         api::wallets::GetWalletResponse,
         api::wallets::DeleteWalletResponse,
         api::balance::BalanceResponse,
-        api::balance::NativeBalanceResponse,
         api::transactions::EstimateFeeRequest,
         api::transactions::EstimateFeeResponse,
         api::transactions::SendTransactionRequest,
@@ -196,23 +203,52 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         storage::repository::transactions::TxStatus,
         blockchain::types::TokenBalance,
         blockchain::types::SendResult,
-        // DRT schemas
-        blockchain::drt::types::DrtInitConfigRequest,
-        blockchain::drt::types::CreatePoolRequest,
+        // DRT schemas (new contract)
+        blockchain::drt::types::DrtRequest,
+        blockchain::drt::types::SchemaFieldRequest,
+        blockchain::drt::types::InlineSchemaRequest,
+        blockchain::drt::types::CreateMaltaPoolRequest,
+        blockchain::drt::types::CreateIobErpPoolRequest,
         blockchain::drt::types::CreatePoolResponse,
-        blockchain::drt::types::BuyDrtRequest,
-        blockchain::drt::types::BuyDrtResponse,
-        blockchain::drt::types::RedeemDrtRequest,
-        blockchain::drt::types::RedeemDrtResponse,
-        blockchain::drt::types::ClosePoolRequest,
-        blockchain::drt::types::ClosePoolResponse,
         blockchain::drt::types::DrtConfigResponse,
         blockchain::drt::types::PoolInfoResponse,
-        blockchain::drt::types::DrtBalanceResponse,
-        blockchain::drt::types::DrtPurchasedEventResponse,
-        blockchain::drt::types::RedeemEventResponse,
+        blockchain::drt::types::GrantRightRequest,
+        blockchain::drt::types::RevokeGrantRequest,
+        blockchain::drt::types::GrantResponse,
+        api::admin::GrantStatusResponse,
+        api::admin::PoolGrantsResponse,
+        api::admin::MyGrantEntry,
+        api::admin::MyGrantsPool,
+        api::admin::MyGrantsResponse,
+        storage::grants::GrantRecord,
+        storage::grants::GrantStatus,
         blockchain::drt::types::TxEventsResponse,
         blockchain::drt::types::DrtEventResponse,
+        // Credential schemas
+        api::credentials::UploadSchemaRequest,
+        api::credentials::UploadSchemaResponse,
+        api::credentials::GetSchemaResponse,
+        data_validation::FieldSchema,
+        data_validation::FieldType,
+        api::credentials::InitializePoolResponse,
+        api::credentials::IssueCredentialsResponse,
+        api::credentials::RevokeCredentialsRequest,
+        api::credentials::RevokeCredentialsResponse,
+        api::credentials::RevocationEntry,
+        api::credentials::RevocationsResponse,
+        api::credentials::PoolAuditResponse,
+        api::credentials::PoolSummaryResponse,
+        api::credentials::DrtConfigResponseCompact,
+        api::credentials::PoolListEntry,
+        api::credentials::PoolsByWalletResponse,
+        api::credentials::MarketplaceDrtEntry,
+        api::credentials::MarketplacePoolEntry,
+        api::credentials::AllPoolsResponse,
+        api::credentials::IssuanceRecord,
+        api::credentials::IssuanceLogResponse,
+        // Audit schemas
+        storage::audit::AuditEvent,
+        storage::audit::AuditEventType,
     )),
     modifiers(&SecurityAddon),
     tags(
@@ -226,6 +262,7 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
         (name = "Balance", description = "Balance query endpoints"),
         (name = "Transactions", description = "Transaction endpoints"),
         (name = "DRT Pools", description = "Data Rights Token pool endpoints"),
+        (name = "Credentials", description = "Credential issuance, revocation, and pool discovery"),
     )
 )]
 struct ApiDoc;
@@ -244,6 +281,10 @@ impl Modify for SecurityAddon {
             );
         }
     }
+}
+
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
 }
 
 // ============================================================================
@@ -269,6 +310,10 @@ async fn main() {
     // Capture process start for uptime reporting.
     let _ = STARTED_AT.set(Instant::now());
 
+    // Install rustls crypto provider early — both axum-server and our
+    // http_client (hyper-rustls) pick this up via process-global default.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     // Initialize enclave keypair.
     let _ = enclave_key();
 
@@ -293,7 +338,7 @@ async fn main() {
     {
         let url = avs_jwks_url();
         if url.starts_with("http://") {
-            let is_local = url.contains("127.0.0.1") || url.contains("localhost");
+            let is_local = config::is_loopback_http_jwks(&url);
             if !is_local {
                 tracing::error!(
                     jwks_url = %url,
@@ -314,7 +359,7 @@ async fn main() {
     {
         let url = avs_jwks_url();
         if url.starts_with("http://") {
-            let is_local = url.contains("127.0.0.1") || url.contains("localhost");
+            let is_local = config::is_loopback_http_jwks(&url);
             if !is_local && !config::ALLOW_HTTP_JWKS {
                 panic!(
                     "AVS_JWKS_URL is plain HTTP for a remote host: {url}. \
@@ -352,6 +397,7 @@ async fn main() {
         solana_client: Arc::new(solana_client),
         tx_db,
         tx_cache,
+        pool_locks: Arc::new(dashmap::DashMap::new()),
     };
 
     // Spawn background transaction indexer only when explicitly enabled.
@@ -394,7 +440,7 @@ async fn main() {
     }
 
     // Build the router with all endpoints.
-    // Body limit: 20MB max for upload endpoints, prevents unbounded memory usage.
+    // Body limit: 50MB max for upload endpoints, prevents unbounded memory usage.
     let app = Router::new()
         // Health endpoints (unversioned for k8s probes).
         .route("/health", get(health))
@@ -402,18 +448,13 @@ async fn main() {
         .route("/health/ready", get(readiness))
         // v1 API endpoints.
         .route("/v1/attestation/public-key", get(get_public_key))
-        .route("/v1/protected", get(protected))
         .route("/v1/admin/status", get(admin_status))
-        .route("/v1/data/validate", post(data_validate))
-        .route("/v1/data/upload", post(data_upload))
-        .route("/v1/data/upload-file", post(data_upload_file))
-        .route("/v1/data/query", get(data_query))
+        .route("/v1/data/query", post(data_query))
+        .route("/api-doc/openapi.json", get(openapi_json))
         // Wallet service routes.
         .merge(api::wallet_router())
         // DRT pool routes.
         .merge(api::drt_router())
-        // OpenAPI documentation.
-        .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("x-content-type-options"),
@@ -429,6 +470,9 @@ async fn main() {
         ))
         .with_state(state);
 
+    #[cfg(feature = "swagger-ui")]
+    let app = app.merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()));
+
     // Bind on all interfaces for VM access.
     let addr = std::net::SocketAddr::from((SERVER_HOST, SERVER_PORT));
     info!(%addr, "Starting HTTPS server");
@@ -438,9 +482,6 @@ async fn main() {
         && std::path::Path::new(DEFAULT_TLS_KEY_PATH).exists();
 
     if tls_paths_exist {
-        // Install rustls crypto provider.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         // Load TLS configuration.
         let tls_config = load_tls_config(DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH)
             .await

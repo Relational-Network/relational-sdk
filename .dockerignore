@@ -8,8 +8,8 @@
 # is excluded here so that builds are reproducible from a clean checkout.
 #
 # Dockerfile COPYs exactly:
-#   rust-toolchain.toml  Cargo.toml  Cargo.lock  src/
-#   relational-sdk.manifest.template
+#   rust-toolchain.toml  Cargo.toml  Cargo.lock  src/  .cargo/
+#   docker/relational-sdk.manifest.template
 #   docker/restart_aesm.sh  docker/start.sh
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -66,6 +66,9 @@ LICENSE
 !README.md
 
 # ── Local measurements snapshot ───────────────────────────────────────────────
-# measurements.txt contains MRENCLAVE/MRSIGNER from a previous build on the
-# local machine.  It must NOT enter the context
-measurements.txt
+# measurements.toml is the pinned release contract. It is consulted by
+# `make verify-mrenclave` and CI from the host, not COPY'd into the image.
+measurements.toml
+
+# Root-level dev manifest template (production uses docker/relational-sdk.manifest.template)
+relational-sdk.manifest.template

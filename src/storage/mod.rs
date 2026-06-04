@@ -14,6 +14,14 @@
 //! ├── wallets/{wallet_id}/
 //! │   ├── meta.json
 //! │   └── keypair.json
+//! ├── pools/{pool_pda}/
+//! │   ├── pool.meta.json
+//! │   ├── dataset/
+//! │   │   ├── initial.csv
+//! │   │   ├── initial.meta.json     # DatasetAnchor: sha256 + record_id
+//! │   │   ├── {uuid}.csv
+//! │   │   └── {uuid}.meta.json      # DatasetAnchor: sha256 + commitment + record_id
+//! │   └── revocations.jsonl
 //! ├── audit/
 //! │   └── 2026-02-24.jsonl
 //! └── tx.redb
@@ -21,8 +29,10 @@
 
 pub mod audit;
 pub mod encrypted_fs;
+pub mod grants;
 pub mod ownership;
 pub mod paths;
+pub mod pool_metadata;
 pub mod repository;
 pub mod tx_cache;
 pub mod tx_database;

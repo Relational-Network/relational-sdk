@@ -98,15 +98,15 @@ fs.mounts = [
 # - true: Allow debugging (NEVER use in production - exposes enclave memory!)
 # - false: Production mode (recommended)
 sgx.debug = {{ 'true' if env.get('SGX_DEBUG', '0') == '1' else 'false' }}
-sgx.enclave_size = "512M"
+sgx.enclave_size = "4G"
 sgx.remote_attestation = "{{ ra_type }}"
 sgx.isvprodid = {{ isvprodid }}
 sgx.isvsvn = {{ isvsvn }}
-sgx.edmm_enable = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
-
-# `use_exinfo = true` is needed because the application may trigger lazy allocation of pages
-# (through exception handling) when EDMM is enabled
-sgx.use_exinfo = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
+# EDMM (per-page W→RX for the wasmtime JIT, src/drt/runtime.rs) needs an
+# EDMM-capable SGX driver, which this host's lacks — keep it + use_exinfo off.
+sgx.edmm_enable = false
+sgx.use_exinfo = false
+sgx.preheat_enclave = false
 
 sgx.trusted_files = [
     "file:{{ self_exe }}",
@@ -134,4 +134,4 @@ sgx.allowed_files = [
 # - any threads and threadpools you might be starting
 # - helper threads internal to Gramine - see:
 #   https://gramine.readthedocs.io/en/stable/manifest-syntax.html#number-of-threads
-sgx.max_threads = {{ '1' if env.get('EDMM', '0') == '1' else '8' }}
+sgx.max_threads = 16

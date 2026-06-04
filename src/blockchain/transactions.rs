@@ -3,12 +3,11 @@
 
 //! Build, sign, and send Solana transactions (native SOL + SPL tokens).
 
+use solana_keypair::Keypair;
 use solana_message::Message;
-use solana_sdk::{
-    pubkey::Pubkey,
-    signature::Signature,
-    signer::{keypair::Keypair, Signer},
-};
+use solana_pubkey::Pubkey;
+use solana_signature::Signature;
+use solana_signer::Signer;
 use solana_system_interface::instruction as system_instruction;
 use solana_transaction::Transaction;
 use std::str::FromStr;
@@ -19,6 +18,59 @@ use super::types::SendResult;
 use crate::error::ApiError;
 
 impl SolanaClient {
+    /// Poll the RPC until the given signature reaches the requested commitment level.
+    ///
+    /// - `confirmed` (~400ms-2s): single validator confirmation.
+    /// - `finalized` (~15-30s): 32 confirmations.
+    ///
+    /// Timeout and poll interval adjust automatically based on the commitment.
+    pub async fn await_confirmation(
+        &self,
+        signature: &Signature,
+        commitment: &str,
+    ) -> Result<(), ApiError> {
+        let (timeout, poll_interval) = if commitment == "finalized" {
+            (
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_millis(1000),
+            )
+        } else {
+            (
+                std::time::Duration::from_secs(30),
+                std::time::Duration::from_millis(400),
+            )
+        };
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > timeout {
+                return Err(ApiError::service_unavailable(format!(
+                    "transaction confirmation timed out ({timeout:?}) at {commitment}"
+                )));
+            }
+            match self.rpc.get_signature_statuses(&[signature]).await {
+                Ok(statuses) => {
+                    if let Some(Some(status)) = statuses.first() {
+                        if status.err.is_some() {
+                            return Err(ApiError::service_unavailable(
+                                "transaction failed on-chain",
+                            ));
+                        }
+                        let confirmed = match status.confirmation_status.as_deref() {
+                            Some("finalized") => true,
+                            Some("confirmed") => commitment != "finalized",
+                            _ => false,
+                        };
+                        if confirmed {
+                            return Ok(());
+                        }
+                    }
+                    tokio::time::sleep(poll_interval).await;
+                }
+                Err(_) => tokio::time::sleep(poll_interval).await,
+            }
+        }
+    }
+
     /// Send native SOL from `keypair` to `recipient`.
     pub async fn send_native(
         &self,
@@ -38,32 +90,12 @@ impl SolanaClient {
         let message = Message::new(&[instruction], Some(&keypair.pubkey()));
         let tx = Transaction::new(&[keypair], message, recent_blockhash);
 
-        // Send without waiting for finalization.
         let signature: Signature =
             self.rpc.send_transaction(&tx).await.map_err(|e| {
                 ApiError::service_unavailable(format!("transaction send failed: {e}"))
             })?;
 
-        // Wait for `confirmed` commitment (~400ms).
-        use solana_commitment_config::CommitmentConfig;
-        let commitment = CommitmentConfig::confirmed();
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(30);
-        loop {
-            if start.elapsed() > timeout {
-                return Err(ApiError::service_unavailable(
-                    "transaction confirmation timed out (30s)".to_string(),
-                ));
-            }
-            match self
-                .rpc
-                .confirm_transaction_with_commitment(&signature, commitment)
-                .await
-            {
-                Ok(resp) if resp.value => break,
-                _ => tokio::time::sleep(std::time::Duration::from_millis(400)).await,
-            }
-        }
+        self.await_confirmation(&signature, "confirmed").await?;
 
         let sig_str = signature.to_string();
         info!(signature = %sig_str, to = %recipient, lamports, "SOL transfer sent");

@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Relational Network
 
-//! Thin wrapper around [`RpcClient`] for common Solana queries.
+//! Thin wrapper around [`JsonRpcClient`] for common Solana queries.
 
-use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_commitment_config::CommitmentConfig;
-use solana_sdk::pubkey::Pubkey;
+use solana_pubkey::Pubkey;
 use std::str::FromStr;
 use tracing::debug;
 
+use super::rpc::JsonRpcClient;
 use super::types::{NetworkConfig, TokenBalance};
 use crate::error::ApiError;
 
@@ -18,7 +17,7 @@ use crate::error::ApiError;
 /// `finalized` (32 confirmations, ~15-30s).  This is safe for reads and
 /// virtually all DRT operations on devnet/mainnet.
 pub struct SolanaClient {
-    pub(crate) rpc: RpcClient,
+    pub(crate) rpc: JsonRpcClient,
     pub(crate) network: NetworkConfig,
 }
 
@@ -28,7 +27,7 @@ impl SolanaClient {
     /// Defaults to `confirmed` commitment for fast transaction confirmation.
     pub fn new(rpc_url: &str, network: NetworkConfig) -> Self {
         Self {
-            rpc: RpcClient::new_with_commitment(rpc_url.to_string(), CommitmentConfig::confirmed()),
+            rpc: JsonRpcClient::new(rpc_url, "confirmed"),
             network,
         }
     }
@@ -39,7 +38,7 @@ impl SolanaClient {
     }
 
     /// Reference to the inner RPC client.
-    pub fn rpc(&self) -> &RpcClient {
+    pub fn rpc(&self) -> &JsonRpcClient {
         &self.rpc
     }
 

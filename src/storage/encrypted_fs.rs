@@ -96,7 +96,11 @@ impl EncryptedStorage {
 
     /// Create required top-level directories. Call once at server startup.
     pub fn initialize(&mut self) -> StorageResult<()> {
-        let dirs = [self.paths.wallets_dir(), self.paths.audit_dir()];
+        let dirs = [
+            self.paths.wallets_dir(),
+            self.paths.audit_dir(),
+            self.paths.pools_dir(),
+        ];
         for dir in &dirs {
             fs::create_dir_all(dir)?;
             debug!(path = %dir.display(), "Ensured storage directory");
@@ -134,7 +138,6 @@ impl EncryptedStorage {
     // ── Raw I/O ───────────────────────────────────────────────────
 
     /// Read raw bytes from a file.
-    #[allow(dead_code)]
     pub fn read_raw(&self, path: impl AsRef<Path>) -> StorageResult<Vec<u8>> {
         let path = path.as_ref();
         fs::read(path).map_err(|e| {
@@ -160,32 +163,6 @@ impl EncryptedStorage {
     pub fn exists(&self, path: impl AsRef<Path>) -> bool {
         fs::File::open(path.as_ref()).is_ok()
     }
-
-    // /// Delete a file.
-    // #[allow(dead_code)]
-    // pub fn delete(&self, path: impl AsRef<Path>) -> StorageResult<()> {
-    //     let path = path.as_ref();
-    //     fs::remove_file(path).map_err(|e| {
-    //         if e.kind() == io::ErrorKind::NotFound {
-    //             StorageError::NotFound(path.display().to_string())
-    //         } else {
-    //             StorageError::Io(e)
-    //         }
-    //     })
-    // }
-
-    // /// Delete a directory and all its contents.
-    // #[allow(dead_code)]
-    // pub fn delete_dir(&self, path: impl AsRef<Path>) -> StorageResult<()> {
-    //     let path = path.as_ref();
-    //     fs::remove_dir_all(path).map_err(|e| {
-    //         if e.kind() == io::ErrorKind::NotFound {
-    //             StorageError::NotFound(path.display().to_string())
-    //         } else {
-    //             StorageError::Io(e)
-    //         }
-    //     })
-    // }
 
     /// Create a directory (+ parents).
     pub fn create_dir(&self, path: impl AsRef<Path>) -> StorageResult<()> {

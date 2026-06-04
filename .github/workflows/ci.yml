@@ -11,6 +11,7 @@
 #   - Docker image build + sign (build-time signing via --mount=type=secret)
 #     - On push to staging: pushed to GHCR, measurements printed to job summary
 #     - On pull_request: built locally for verification only (not pushed)
+#   - MRENCLAVE verification against measurements.toml
 #
 # For full SGX testing including RA-TLS attestation, run on an SGX VM:
 #   make RA_TYPE=dcap
@@ -59,13 +60,15 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - '.cargo/**'
             docker:
               - 'docker/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'src/**'
               - '*.manifest.template'
-              - 'measurements.txt'
+              - 'measurements.toml'
+              - 'Makefile'
             config:
               - 'scripts/**'
               - 'docker/Dockerfile'
@@ -169,6 +172,11 @@ jobs:
           dockerfile: docker/Dockerfile
           failure-threshold: warning
 
+      - name: Validate shell scripts
+        run: |
+          sh -n docker/start.sh
+          sh -n docker/restart_aesm.sh
+
   build-docker:
     name: Build & Sign Docker Image
     runs-on: ubuntu-latest
@@ -182,6 +190,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      IMAGE_TAG: ghcr.io/relational-network/relational-sdk:sha-${{ github.sha }}
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -229,7 +239,27 @@ jobs:
 
           echo "✓ Valid 3072-bit RSA key with exponent 3"
 
+      - name: Stage AVS RA-TLS trust anchor into build context
+        # The Dockerfile bakes /app/avs-ca.crt into the image and measures it
+        # into MRENCLAVE via sgx.trusted_files. The cert is public (only the
+        # matching avs-tls.key is sensitive), but we still load it from a GH
+        # secret so rotation goes through the same review/audit path as other
+        # release-affecting changes.
+        env:
+          AVS_TLS_CRT: ${{ secrets.AVS_TLS_CRT }}
+        run: |
+          if [ -z "${AVS_TLS_CRT:-}" ]; then
+            echo "::error::AVS_TLS_CRT secret is not set. Generate it by base64-decoding the AVS host's secrets/avs-tls.crt and storing the PEM contents in the AVS_TLS_CRT GitHub Actions secret."
+            exit 1
+          fi
+          printenv AVS_TLS_CRT > avs-ca.crt
+          if ! openssl x509 -in avs-ca.crt -noout -subject -issuer -dates; then
+            echo "::error::AVS_TLS_CRT does not parse as a PEM X.509 certificate."
+            exit 1
+          fi
+
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -237,50 +267,93 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           load: true
           tags: |
-            ghcr.io/relational-network/relational-sdk:sha-${{ github.sha }}
+            ${{ env.IMAGE_TAG }}
             ${{ github.ref == 'refs/heads/staging' && 'ghcr.io/relational-network/relational-sdk:staging-latest' || '' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=relational-sdk-sgx
+          cache-to: type=gha,scope=relational-sdk-sgx,mode=max
           secret-files: |
-            signing_key=${{ runner.temp }}/enclave-key.pem
-          build-args: |
-            SGX_DEBUG=0
+            sgx-key=${{ runner.temp }}/enclave-key.pem
+
+      - name: Print measurements to job summary
+        run: |
+          docker run --rm \
+            --entrypoint gramine-sgx-sigstruct-view \
+            "${IMAGE_TAG}" \
+            /app/relational-sdk.sig | tee "$RUNNER_TEMP/relational-sdk.sigstruct.txt"
+
+          {
+            echo "## Enclave Measurements"
+            echo '```text'
+            cat "$RUNNER_TEMP/relational-sdk.sigstruct.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify signed enclave settings
+        run: |
+          SIGSTRUCT="$RUNNER_TEMP/relational-sdk.sigstruct.txt"
+          DEBUG_ENCLAVE=$(awk '/debug_enclave:/ {print $2; exit}' "$SIGSTRUCT")
+          ISV_PROD_ID=$(awk '/isv_prod_id:/ {print $2; exit}' "$SIGSTRUCT")
+          ISV_SVN=$(awk '/isv_svn:/ {print $2; exit}' "$SIGSTRUCT")
+
+          if [ "$DEBUG_ENCLAVE" != "False" ]; then
+            echo "::error::Production Docker build must produce a non-debug enclave (got debug_enclave=$DEBUG_ENCLAVE)"
+            exit 1
+          fi
+
+          if [ "$ISV_PROD_ID" != "0" ]; then
+            echo "::error::Expected isv_prod_id=0, got $ISV_PROD_ID"
+            exit 1
+          fi
+
+          if [ "$ISV_SVN" != "0" ]; then
+            echo "::error::Expected isv_svn=0, got $ISV_SVN"
+            exit 1
+          fi
+
+          echo "✓ debug_enclave=False, isv_prod_id=0, isv_svn=0"
+
+      - name: Verify MRENCLAVE matches measurements.toml
+        run: |
+          BUILT_MR=$(awk '/mr_enclave:/ {print $2; exit}' "$RUNNER_TEMP/relational-sdk.sigstruct.txt")
+          EXPECTED_MR=$(sed -n 's/^mr_enclave = "\(.*\)"$/\1/p' measurements.toml | head -1)
+
+          echo "Built:    $BUILT_MR"
+          echo "Expected: $EXPECTED_MR  (measurements.toml)"
+
+          if ! printf '%s\n' "$EXPECTED_MR" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::warning::measurements.toml does not yet contain a pinned mr_enclave. Update it before the first release."
+            exit 0
+          fi
+
+          if [ "$BUILT_MR" != "$EXPECTED_MR" ]; then
+            echo "::error::MRENCLAVE changed!"
+            echo "::error::Built:    $BUILT_MR"
+            echo "::error::Expected: $EXPECTED_MR"
+            echo "If intentional, update measurements.toml in the same PR."
+            exit 1
+          fi
+          echo "✓ MRENCLAVE matches measurements.toml"
+
+      - name: Record image digest
+        if: github.event_name == 'push'
+        run: |
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE_TAG}" | cut -d@ -f2)
+
+          {
+            echo "## Container Image"
+            echo '```'
+            echo "Tag:    ${IMAGE_TAG}"
+            echo "Digest: ${DIGEST}"
+            echo "Deploy: ghcr.io/relational-network/relational-sdk@${DIGEST}"
+            echo '```'
+            echo ""
+            echo "> **Deploy by digest, not by tag.** Use the \`Deploy\` reference above"
+            echo "> to pin the exact image content alongside the MRENCLAVE measurement."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Shred signing key
         if: always()
         run: shred -u "$RUNNER_TEMP/enclave-key.pem" 2>/dev/null || true
-
-      - name: Print measurements to job summary
-        if: github.event_name == 'push'
-        run: |
-          echo "## Enclave Measurements" >> $GITHUB_STEP_SUMMARY
-          docker run --rm \
-            --entrypoint gramine-sgx-sigstruct-view \
-            ghcr.io/relational-network/relational-sdk:sha-${{ github.sha }} \
-            /app/relational-sdk.sig >> $GITHUB_STEP_SUMMARY
-
-      - name: Verify MRENCLAVE matches measurements.txt
-        run: |
-          BUILT_MR=$(docker run --rm \
-            --entrypoint gramine-sgx-sigstruct-view \
-            ghcr.io/relational-network/relational-sdk:sha-${{ github.sha }} \
-            /app/relational-sdk.sig 2>/dev/null \
-            | grep 'mr_enclave:' | awk '{print $2}' | head -1)
-
-          EXPECTED_MR=$(grep '^mr_enclave:' measurements.txt | awk '{print $2}' | head -1)
-
-          echo "Built:    $BUILT_MR"
-          echo "Expected: $EXPECTED_MR  (measurements.txt)"
-
-          if [ "$BUILT_MR" != "$EXPECTED_MR" ]; then
-            echo "::error::MRENCLAVE changed!"
-            echo "  Built:    $BUILT_MR"
-            echo "  Expected: $EXPECTED_MR"
-            echo ""
-            echo "If this change is intentional, update measurements.txt in the same PR."
-            exit 1
-          fi
-          echo "✓ MRENCLAVE matches measurements.txt"
 
   # ── Deploy to staging ──────────────────────────────────────────────────────
   # Called directly after build-docker succeeds on push to staging.

@@ -11,8 +11,9 @@
 //! # Role Hierarchy
 //!
 //! Roles follow a hierarchy where higher roles include lower permissions:
-//! - `admin` - Full access (includes user and read_only)
-//! - `user` - Read/write access (includes read_only)
+//! - `admin` - Full access (includes user, analyst, and read_only)
+//! - `user` - Read/write access (includes analyst and read_only)
+//! - `analyst` - Marketplace access: buy/redeem DRTs, view pools (includes read_only)
 //! - `read_only` - Read-only access
 //!
 //! # Usage
@@ -27,7 +28,10 @@
 //! // User or admin
 //! async fn user_endpoint(UserToken(token): UserToken) -> impl IntoResponse { ... }
 //!
-//! // Any role (read_only, user, or admin)
+//! // Analyst, user, or admin
+//! async fn analyst_endpoint(AnalystToken(token): AnalystToken) -> impl IntoResponse { ... }
+//!
+//! // Any role (read_only, user, analyst, or admin)
 //! async fn read_endpoint(ReadOnlyToken(token): ReadOnlyToken) -> impl IntoResponse { ... }
 //! ```
 
@@ -39,10 +43,11 @@ use axum::{
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use std::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
-use crate::config::{avs_jwks_url, AVS_ISSUER, JWKS_CACHE_TTL_SECS};
+use crate::config::{avs_jwks_url, is_loopback_http_jwks, AVS_ISSUER, JWKS_CACHE_TTL_SECS};
 use crate::crypto::{enclave_key, Jwk, JwksResponse};
+use crate::http_client::HttpClient;
 use crate::state::AppState;
 
 /// Claims from AVS-issued attestation tokens.
@@ -75,14 +80,14 @@ pub struct AttestationClaims {
 pub struct TokenData {
     /// User/client identifier from the `sub` claim.
     pub sub: String,
-    /// User role for RBAC (admin, user, read_only).
+    /// User role for RBAC (admin, user, analyst, read_only).
     pub role: String,
 }
 
 impl TokenData {
     /// Check if the user has the required role.
     ///
-    /// Role hierarchy: admin > user > read_only
+    /// Role hierarchy: admin > user > analyst > read_only
     ///
     /// # Examples
     ///
@@ -90,16 +95,22 @@ impl TokenData {
     /// let token = TokenData { role: "admin".to_string(), ... };
     /// assert!(token.has_role("admin"));
     /// assert!(token.has_role("user"));
+    /// assert!(token.has_role("analyst"));
     /// assert!(token.has_role("read_only"));
     ///
-    /// let token = TokenData { role: "user".to_string(), ... };
+    /// let token = TokenData { role: "analyst".to_string(), ... };
     /// assert!(!token.has_role("admin"));
-    /// assert!(token.has_role("user"));
+    /// assert!(!token.has_role("user"));
+    /// assert!(token.has_role("analyst"));
     /// assert!(token.has_role("read_only"));
     /// ```
     pub fn has_role(&self, required: &str) -> bool {
         match required {
-            "read_only" => matches!(self.role.as_str(), "admin" | "user" | "read_only"),
+            "read_only" => matches!(
+                self.role.as_str(),
+                "admin" | "user" | "analyst" | "read_only"
+            ),
+            "analyst" => matches!(self.role.as_str(), "admin" | "user" | "analyst"),
             "user" => matches!(self.role.as_str(), "admin" | "user"),
             "admin" => self.role == "admin",
             _ => false,
@@ -115,31 +126,29 @@ pub struct JwksCache {
 
 /// Fetch JWKS from AVS and parse the decoding keys.
 pub async fn fetch_jwks(url: &str) -> Result<Vec<(String, DecodingKey)>, String> {
-    // Build HTTP client — use AVS_CA_CERT_PATH as trusted root when set,
-    // otherwise use system default CA bundle (no blanket cert bypass).
-    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10));
-
-    if let Ok(ca_path) = std::env::var("AVS_CA_CERT_PATH") {
+    // Build HTTP client — use AVS_CA_CERT_PATH as an extra trusted root when
+    // set, otherwise use the webpki bundle (no blanket cert bypass).
+    let client = if let Ok(ca_path) = std::env::var("AVS_CA_CERT_PATH") {
         let pem = std::fs::read(&ca_path)
             .map_err(|e| format!("failed to read AVS_CA_CERT_PATH ({ca_path}): {e}"))?;
-        let cert = reqwest::Certificate::from_pem(&pem)
+        let c = HttpClient::with_extra_ca_pem(&pem)
             .map_err(|e| format!("invalid PEM in AVS_CA_CERT_PATH ({ca_path}): {e}"))?;
-        builder = builder.add_root_certificate(cert);
         tracing::info!(path = %ca_path, "Loaded custom CA certificate for JWKS fetch");
+        c
+    } else {
+        HttpClient::new()
     }
-
-    let client = builder
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    .with_timeout(std::time::Duration::from_secs(10));
 
     let response = client
         .get(url)
-        .send()
         .await
         .map_err(|e| format!("failed to fetch JWKS: {e}"))?;
+    if !response.is_success() {
+        return Err(format!("JWKS fetch returned HTTP {}", response.status()));
+    }
     let jwks: JwksResponse = response
-        .json()
-        .await
+        .into_json()
         .map_err(|e| format!("failed to parse JWKS: {e}"))?;
 
     let mut keys = Vec::new();
@@ -176,8 +185,10 @@ pub async fn get_decoding_keys(state: &AppState) -> Result<Vec<(String, Decoding
 
     // Fetch and update cache.
     let url = avs_jwks_url();
-    // Warn if using HTTP (insecure in production)
-    if url.starts_with("http://") && !url.contains("localhost") && !url.contains("127.0.0.1") {
+    // Warn if using HTTP for a non-loopback host (insecure in production).
+    // Uses parsed-host check; substring matching would let `evil.com/localhost`
+    // through.
+    if url.starts_with("http://") && !is_loopback_http_jwks(&url) {
         tracing::warn!(
             "JWKS URL uses HTTP - this is insecure in production: {}",
             url
@@ -213,22 +224,29 @@ pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenData, 
         warn!(error = %e, "Invalid token header");
         format!("invalid token header: {e}")
     })?;
-    let kid = header.kid.as_deref();
-    debug!(kid = ?kid, "Validating token");
+    // Require non-empty `kid`. AVS sets `AVS_SIGNING_KEY_ID` on every token,
+    // and rejecting missing/empty `kid` here removes the JWKS-ordering
+    // dependency (no silent fallback to `keys[0]`) and surfaces key rotation
+    // misconfiguration loudly.
+    let kid = header
+        .kid
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| {
+            warn!("Token header missing or empty `kid`");
+            "token header missing kid".to_string()
+        })?;
+    debug!(kid = %kid, "Validating token");
 
-    // Find matching key or try first key.
-    let decoding_key = if let Some(kid) = kid {
-        keys.iter()
-            .find(|(k, _)| k == kid)
-            .map(|(_, key)| key)
-            .ok_or_else(|| {
-                warn!(kid = %kid, "No matching key found in JWKS");
-                format!("no key found for kid: {kid}")
-            })?
-    } else {
-        debug!("Token has no kid, using first key from JWKS");
-        &keys[0].1
-    };
+    // Find matching key — exact `kid` match required, no fallback.
+    let decoding_key = keys
+        .iter()
+        .find(|(k, _)| k == kid)
+        .map(|(_, key)| key)
+        .ok_or_else(|| {
+            warn!(kid = %kid, "No matching key found in JWKS");
+            format!("no key found for kid: {kid}")
+        })?;
 
     // Configure validation.
     let mut validation = Validation::new(Algorithm::ES256);
@@ -284,7 +302,7 @@ pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenData, 
             .unwrap_or_else(|| "read_only".to_string()),
     };
 
-    info!(
+    debug!(
         sub = %result.sub,
         role = %result.role,
         "Token validated successfully"
@@ -389,9 +407,35 @@ impl FromRequestParts<AppState> for UserToken {
     }
 }
 
+/// Extractor that requires "analyst" role (or higher).
+///
+/// Returns 403 Forbidden if the user has only read_only role.
+///
+/// Used by `/v1/data/query` and the pool-detail / summary / audit read paths.
+#[derive(Debug, Clone)]
+pub struct AnalystToken(pub TokenData);
+
+impl FromRequestParts<AppState> for AnalystToken {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = TokenData::from_request_parts(parts, state).await?;
+        if !token.has_role("analyst") {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "analyst role required"})),
+            ));
+        }
+        Ok(AnalystToken(token))
+    }
+}
+
 /// Extractor that requires "read_only" role (or higher).
 ///
-/// Any authenticated user with a valid role passes this check.
+/// Any authenticated user with a valid role (admin, user, analyst, read_only) passes.
 #[derive(Debug, Clone)]
 pub struct ReadOnlyToken(pub TokenData);
 

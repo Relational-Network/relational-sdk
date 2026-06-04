@@ -9,82 +9,56 @@
 //! ```text
 //! Program data: <base64-encoded-data>
 //! ```
-//!
-//! We scan log lines for this prefix, decode, match discriminators, and
-//! deserialize.
 
 use base64::Engine;
 use borsh::BorshDeserialize;
-use solana_sdk::pubkey::Pubkey;
+use solana_pubkey::Pubkey;
 
 use super::types::*;
 
 // ============================================================================
-// Raw event structs (Borsh-deserializable from on-chain log data)
+// Raw event structs (Borsh-deserialisable from log data)
 // ============================================================================
 
 #[derive(Debug, Clone, BorshDeserialize)]
 pub struct PoolCreatedEvent {
     pub pool: Pubkey,
+    pub uuid: [u8; 16],
     pub owner: Pubkey,
-    pub name: String,
-    pub drt_types: Vec<String>,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, BorshDeserialize)]
-// All fields required for correct Borsh deserialization layout
-pub struct DrtInitializedEvent {
+pub struct DrtRegisteredEvent {
     pub pool: Pubkey,
-    pub owner: Pubkey,
-    pub drt_type: String,
+    pub drt_config: Pubkey,
     pub mint: Pubkey,
+    pub right_id: [u8; 16],
     pub supply: u64,
-    pub cost: u64,
-    #[allow(dead_code)]
-    pub fixed_supply: bool,
-    #[allow(dead_code)]
-    pub enable_transfer_hook: bool,
-    #[allow(dead_code)]
-    pub transfer_fee_basis_points: u16,
-    #[allow(dead_code)]
-    pub max_transfer_fee: u64,
-    pub timestamp: i64,
+    pub code_hash: [u8; 32],
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, BorshDeserialize)]
-pub struct DrtPurchasedEvent {
+pub struct RightGrantedEvent {
     pub pool: Pubkey,
-    pub drt_type: String,
-    pub buyer: Pubkey,
-    pub cost: u64,
-    pub amount: u64,
-    pub total_cost: u64,
-    pub timestamp: i64,
+    pub drt_config: Pubkey,
+    pub commitment: [u8; 32],
+    pub granted_at: i64,
 }
 
 #[derive(Debug, Clone, BorshDeserialize)]
-pub struct DrtRedeemedEvent {
+pub struct RightRevokedEvent {
     pub pool: Pubkey,
-    pub drt_type: String,
-    pub redeemer: Pubkey,
-    pub github_url: String,
-    pub expected_hash: [u8; 32],
-    pub timestamp: i64,
+    pub drt_config: Pubkey,
+    pub commitment: [u8; 32],
+    pub revoked_at: i64,
 }
 
 #[derive(Debug, Clone, BorshDeserialize)]
-pub struct AppendRedeemedEvent {
+pub struct PoolSealedEvent {
     pub pool: Pubkey,
-    pub drt_type: String,
-    pub redeemer: Pubkey,
-    pub timestamp: i64,
-}
-
-#[derive(Debug, Clone, BorshDeserialize)]
-pub struct PoolClosedEvent {
-    pub pool: Pubkey,
-    pub owner: Pubkey,
-    pub timestamp: i64,
+    pub sealed_at: i64,
 }
 
 // ============================================================================
@@ -94,59 +68,45 @@ pub struct PoolClosedEvent {
 #[derive(Debug, Clone)]
 pub enum DrtEvent {
     PoolCreated(PoolCreatedEvent),
-    DrtInitialized(DrtInitializedEvent),
-    DrtPurchased(DrtPurchasedEvent),
-    DrtRedeemed(DrtRedeemedEvent),
-    AppendRedeemed(AppendRedeemedEvent),
-    PoolClosed(PoolClosedEvent),
+    DrtRegistered(DrtRegisteredEvent),
+    RightGranted(RightGrantedEvent),
+    RightRevoked(RightRevokedEvent),
+    PoolSealed(PoolSealedEvent),
 }
 
 impl DrtEvent {
-    /// Convert to API-friendly response type.
     pub fn to_response(&self) -> DrtEventResponse {
         match self {
             DrtEvent::PoolCreated(e) => DrtEventResponse::PoolCreated {
                 pool: e.pool.to_string(),
+                uuid: hex::encode(e.uuid),
                 owner: e.owner.to_string(),
-                name: e.name.clone(),
-                drt_types: e.drt_types.clone(),
+                created_at: e.created_at,
             },
-            DrtEvent::DrtInitialized(e) => DrtEventResponse::DrtInitialized {
+            DrtEvent::DrtRegistered(e) => DrtEventResponse::DrtRegistered {
                 pool: e.pool.to_string(),
-                owner: e.owner.to_string(),
-                drt_type: e.drt_type.clone(),
+                drt_config: e.drt_config.to_string(),
                 mint: e.mint.to_string(),
+                right_id: hex::encode(e.right_id),
                 supply: e.supply,
-                cost: e.cost,
-                timestamp: e.timestamp,
+                code_hash: hex::encode(e.code_hash),
+                created_at: e.created_at,
             },
-            DrtEvent::DrtPurchased(e) => DrtEventResponse::DrtPurchased {
+            DrtEvent::RightGranted(e) => DrtEventResponse::RightGranted {
                 pool: e.pool.to_string(),
-                drt_type: e.drt_type.clone(),
-                buyer: e.buyer.to_string(),
-                cost: e.cost,
-                amount: e.amount,
-                total_cost: e.total_cost,
-                timestamp: e.timestamp,
+                drt_config: e.drt_config.to_string(),
+                commitment: hex::encode(e.commitment),
+                granted_at: e.granted_at,
             },
-            DrtEvent::DrtRedeemed(e) => DrtEventResponse::DrtRedeemed {
+            DrtEvent::RightRevoked(e) => DrtEventResponse::RightRevoked {
                 pool: e.pool.to_string(),
-                drt_type: e.drt_type.clone(),
-                redeemer: e.redeemer.to_string(),
-                github_url: e.github_url.clone(),
-                expected_hash: hex::encode(e.expected_hash),
-                timestamp: e.timestamp,
+                drt_config: e.drt_config.to_string(),
+                commitment: hex::encode(e.commitment),
+                revoked_at: e.revoked_at,
             },
-            DrtEvent::AppendRedeemed(e) => DrtEventResponse::AppendRedeemed {
+            DrtEvent::PoolSealed(e) => DrtEventResponse::PoolSealed {
                 pool: e.pool.to_string(),
-                drt_type: e.drt_type.clone(),
-                redeemer: e.redeemer.to_string(),
-                timestamp: e.timestamp,
-            },
-            DrtEvent::PoolClosed(e) => DrtEventResponse::PoolClosed {
-                pool: e.pool.to_string(),
-                owner: e.owner.to_string(),
-                timestamp: e.timestamp,
+                sealed_at: e.sealed_at,
             },
         }
     }
@@ -159,9 +119,6 @@ impl DrtEvent {
 const PROGRAM_DATA_PREFIX: &str = "Program data: ";
 
 /// Parse DRT events from transaction log lines.
-///
-/// Scans for `"Program data: "` lines, base64-decodes the payload, matches
-/// the 8-byte Anchor discriminator, and Borsh-deserializes the rest.
 pub fn parse_drt_events(logs: &[String]) -> Vec<DrtEvent> {
     let mut events = Vec::new();
 
@@ -187,21 +144,18 @@ pub fn parse_drt_events(logs: &[String]) -> Vec<DrtEvent> {
             DISC_POOL_CREATED => PoolCreatedEvent::try_from_slice(payload)
                 .ok()
                 .map(DrtEvent::PoolCreated),
-            DISC_DRT_INITIALIZED => DrtInitializedEvent::try_from_slice(payload)
+            DISC_DRT_REGISTERED => DrtRegisteredEvent::try_from_slice(payload)
                 .ok()
-                .map(DrtEvent::DrtInitialized),
-            DISC_DRT_PURCHASED => DrtPurchasedEvent::try_from_slice(payload)
+                .map(DrtEvent::DrtRegistered),
+            DISC_RIGHT_GRANTED => RightGrantedEvent::try_from_slice(payload)
                 .ok()
-                .map(DrtEvent::DrtPurchased),
-            DISC_DRT_REDEEMED => DrtRedeemedEvent::try_from_slice(payload)
+                .map(DrtEvent::RightGranted),
+            DISC_RIGHT_REVOKED => RightRevokedEvent::try_from_slice(payload)
                 .ok()
-                .map(DrtEvent::DrtRedeemed),
-            DISC_APPEND_REDEEMED => AppendRedeemedEvent::try_from_slice(payload)
+                .map(DrtEvent::RightRevoked),
+            DISC_POOL_SEALED => PoolSealedEvent::try_from_slice(payload)
                 .ok()
-                .map(DrtEvent::AppendRedeemed),
-            DISC_POOL_CLOSED => PoolClosedEvent::try_from_slice(payload)
-                .ok()
-                .map(DrtEvent::PoolClosed),
+                .map(DrtEvent::PoolSealed),
             _ => None,
         };
 
@@ -215,54 +169,26 @@ pub fn parse_drt_events(logs: &[String]) -> Vec<DrtEvent> {
 
 /// Fetch and parse DRT events from a confirmed transaction signature.
 pub async fn parse_events_from_signature(
-    rpc: &solana_client::nonblocking::rpc_client::RpcClient,
+    rpc: &crate::blockchain::rpc::JsonRpcClient,
     signature_str: &str,
 ) -> Result<Vec<DrtEvent>, crate::error::ApiError> {
-    parse_events_from_signature_with_commitment(
-        rpc,
-        signature_str,
-        solana_commitment_config::CommitmentConfig::confirmed(),
-    )
-    .await
+    parse_events_from_signature_with_commitment(rpc, signature_str, "confirmed").await
 }
 
 /// Fetch and parse DRT events at a specific commitment level.
 pub async fn parse_events_from_signature_with_commitment(
-    rpc: &solana_client::nonblocking::rpc_client::RpcClient,
+    rpc: &crate::blockchain::rpc::JsonRpcClient,
     signature_str: &str,
-    commitment: solana_commitment_config::CommitmentConfig,
+    commitment: &str,
 ) -> Result<Vec<DrtEvent>, crate::error::ApiError> {
-    use solana_sdk::signature::Signature;
-    use solana_transaction_status::UiTransactionEncoding;
-    use std::str::FromStr;
-
-    let signature = Signature::from_str(signature_str)
-        .map_err(|_| crate::error::ApiError::bad_request("invalid transaction signature"))?;
-
-    let config = solana_client::rpc_config::RpcTransactionConfig {
-        encoding: Some(UiTransactionEncoding::Json),
-        commitment: Some(commitment),
-        max_supported_transaction_version: Some(0),
-    };
-
     let tx = rpc
-        .get_transaction_with_config(&signature, config)
+        .get_transaction(signature_str, commitment)
         .await
         .map_err(|e| {
             crate::error::ApiError::service_unavailable(format!("failed to fetch transaction: {e}"))
         })?;
 
-    let logs: Vec<String> = tx
-        .transaction
-        .meta
-        .and_then(|m| {
-            use solana_transaction_status::option_serializer::OptionSerializer;
-            match m.log_messages {
-                OptionSerializer::Some(v) => Some(v),
-                _ => None,
-            }
-        })
-        .unwrap_or_default();
+    let logs = tx.meta.map(|m| m.log_messages).unwrap_or_default();
 
     Ok(parse_drt_events(&logs))
 }

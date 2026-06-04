@@ -45,13 +45,19 @@ pub const DEFAULT_TLS_KEY_PATH: &str = "/tmp/ra-tls.key.pem";
 // ============================================================================
 
 /// Bind address for the HTTPS server.
-pub const SERVER_HOST: [u8; 4] = [0, 0, 0, 0];
+///
+/// Defaults to loopback. The enclave must only be reached via the Caddy
+/// reverse proxy in production. Any deployment that binds the enclave to a
+/// public interface bypasses the edge security controls (TLS termination,
+/// CORS, future rate limiting). Override would require a code change
+/// (intentional — the manifest also pins this).
+pub const SERVER_HOST: [u8; 4] = [127, 0, 0, 1];
 
 /// Port for the HTTPS server.
 pub const SERVER_PORT: u16 = 8080;
 
-/// Maximum request body size (20 MiB).
-pub const MAX_BODY_SIZE: usize = 20 * 1024 * 1024;
+/// Maximum request body size (50 MiB).
+pub const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
 
 // ============================================================================
 // Storage
@@ -85,6 +91,13 @@ pub const INDEXER_ENABLED: bool = false;
 /// Tx indexer poll interval in seconds (when enabled).
 pub const INDEXER_POLL_INTERVAL_SECS: u64 = 60;
 
+/// Minimum seconds between on-demand Solana RPC syncs for the same address.
+///
+/// Prevents expensive repeated RPC calls on rapid page loads.
+/// After syncing an address, subsequent requests within this window
+/// skip the RPC call and return cached data from redb.
+pub const SYNC_COOLDOWN_SECS: u64 = 10;
+
 /// LRU cache capacity (number of wallet first-pages cached).
 pub const TX_CACHE_CAPACITY: usize = 128;
 
@@ -106,12 +119,14 @@ pub const NONCE_PURGE_INTERVAL_SECS: u64 = 900;
 // ============================================================================
 
 /// DRT program ID on Solana (devnet). Hardcoded — change and rebuild to update.
-pub const DRT_PROGRAM_ID_STR: &str = "kG7AyfxRoNKcYWGH8aDR6tCFpLVcETt2kBVaPnQCrnp";
+/// Canonical: `digital_rights_tokens` Anchor program. IDL lives at
+/// `relational-sdk/idl/digital_rights_tokens.json`.
+pub const DRT_PROGRAM_ID_STR: &str = "8N5hVnK81rWhwfhxt9LfjrbeVT83Jjgy4dKyy4q6HKjk";
 
 /// Get the DRT program `Pubkey` (parsed from the hardcoded constant).
-pub fn drt_program_id() -> solana_sdk::pubkey::Pubkey {
+pub fn drt_program_id() -> solana_pubkey::Pubkey {
     use std::str::FromStr;
-    solana_sdk::pubkey::Pubkey::from_str(DRT_PROGRAM_ID_STR)
+    solana_pubkey::Pubkey::from_str(DRT_PROGRAM_ID_STR)
         .expect("DRT_PROGRAM_ID_STR is a valid Solana pubkey")
 }
 
@@ -126,3 +141,71 @@ pub fn drt_program_id() -> solana_sdk::pubkey::Pubkey {
 /// If a future deployment separates AVS onto a remote host, flip to `false`
 /// and rebuild.
 pub const ALLOW_HTTP_JWKS: bool = true;
+
+/// Returns `true` when `url` is an `http://` URL whose host is the loopback
+/// interface (`localhost`, `127.0.0.1`, or `::1`).
+///
+/// Used to gate the "plain HTTP JWKS" warning and the production hard-block.
+/// Substring matching (e.g. `url.contains("localhost")`) is unsafe — a host
+/// like `attacker.example.com/localhost/...` would have falsely passed.
+/// This parser extracts the authority and matches the host exactly.
+pub fn is_loopback_http_jwks(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    // Authority ends at the first '/', '?', or '#'.
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    // Strip optional userinfo (`user:pass@host`).
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    // IPv6 literals are wrapped in `[...]`.
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((h, _)) => h,
+            None => return false,
+        }
+    } else {
+        host_port
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_port)
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_http_jwks_accepts_loopback_hosts() {
+        assert!(is_loopback_http_jwks("http://localhost:9100/jwks"));
+        assert!(is_loopback_http_jwks(
+            "http://127.0.0.1:9100/.well-known/jwks.json"
+        ));
+        assert!(is_loopback_http_jwks("http://[::1]:9100/jwks"));
+        assert!(is_loopback_http_jwks("http://localhost"));
+    }
+
+    #[test]
+    fn loopback_http_jwks_rejects_substring_bypass() {
+        // The old `url.contains("localhost")` check would have accepted these.
+        assert!(!is_loopback_http_jwks(
+            "http://attacker.example.com/localhost"
+        ));
+        assert!(!is_loopback_http_jwks("http://localhost.evil.com/jwks"));
+        assert!(!is_loopback_http_jwks("http://user@evil.com/127.0.0.1"));
+        assert!(!is_loopback_http_jwks(
+            "http://example.com:8080/path?host=127.0.0.1"
+        ));
+    }
+
+    #[test]
+    fn loopback_http_jwks_rejects_https_and_other_schemes() {
+        assert!(!is_loopback_http_jwks("https://localhost/jwks"));
+        assert!(!is_loopback_http_jwks("file:///tmp/jwks"));
+    }
+}
